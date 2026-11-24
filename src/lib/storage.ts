@@ -1,7 +1,9 @@
 import type {
+  AttachmentKind,
   ChatMessage,
   Conversation,
   ExportPayload,
+  MessageAttachment,
   UserSettings,
 } from '../types/chat';
 import { DEFAULT_ELIGIBLE_MODEL, ELIGIBLE_MODELS } from './chatValidation';
@@ -12,8 +14,11 @@ const ACTIVE_ID_KEY = 'consul_ai_active_conversation_v1';
 
 export const DEFAULT_SETTINGS: UserSettings = {
   theme: 'light',
-  responseLength: 'concise',
+  responseLength: 'balanced',
   model: DEFAULT_ELIGIBLE_MODEL,
+  preferredLanguage: 'auto',
+  liveVoiceName: 'Zephyr',
+  maxUploadMb: 10,
 };
 
 export function loadConversations(): Conversation[] {
@@ -31,7 +36,15 @@ export function loadConversations(): Conversation[] {
 export function saveConversations(conversations: Conversation[]): boolean {
   if (typeof window === 'undefined') return false;
   try {
-    window.localStorage.setItem(CONVERSATIONS_KEY, JSON.stringify(conversations));
+    // Strip heavy base64 image payloads if falling back to localStorage to stay within 5MB quota
+    const lightweight = conversations.map((c) => ({
+      ...c,
+      messages: c.messages.map((m) => ({
+        ...m,
+        attachments: m.attachments?.map(({ inlineImageBase64: _b64, ...rest }) => rest),
+      })),
+    }));
+    window.localStorage.setItem(CONVERSATIONS_KEY, JSON.stringify(lightweight));
     return true;
   } catch {
     return false;
@@ -69,13 +82,30 @@ export function loadSettings(): UserSettings {
     return {
       theme: parsed.theme === 'dark' ? 'dark' : 'light',
       responseLength:
-        parsed.responseLength === 'balanced' || parsed.responseLength === 'detailed'
-          ? parsed.responseLength
-          : 'concise',
+        parsed.responseLength === 'quick' ||
+        parsed.responseLength === 'balanced' ||
+        parsed.responseLength === 'detailed' ||
+        parsed.responseLength === 'concise'
+          ? (parsed.responseLength === 'concise' ? 'quick' : parsed.responseLength)
+          : 'balanced',
       model:
         parsed.model && (ELIGIBLE_MODELS as readonly string[]).includes(parsed.model)
           ? parsed.model
           : DEFAULT_ELIGIBLE_MODEL,
+      preferredLanguage:
+        parsed.preferredLanguage === 'en' ||
+        parsed.preferredLanguage === 'ur' ||
+        parsed.preferredLanguage === 'roman-ur'
+          ? parsed.preferredLanguage
+          : 'auto',
+      liveVoiceName: parsed.liveVoiceName === 'Kore' ? 'Kore' : 'Zephyr',
+      maxUploadMb:
+        typeof parsed.maxUploadMb === 'number' &&
+        Number.isFinite(parsed.maxUploadMb) &&
+        parsed.maxUploadMb >= 2 &&
+        parsed.maxUploadMb <= 20
+          ? parsed.maxUploadMb
+          : 10,
     };
   } catch {
     return DEFAULT_SETTINGS;
@@ -99,6 +129,45 @@ export function clearAllStoredConversations(): void {
   } catch {
     // Ignore storage errors
   }
+}
+
+function sanitizeStoredAttachment(raw: unknown): MessageAttachment | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const item = raw as Record<string, unknown>;
+  if (typeof item.name !== 'string' || !item.name.trim()) return null;
+  const kind: AttachmentKind =
+    item.kind === 'spreadsheet' ||
+    item.kind === 'presentation' ||
+    item.kind === 'image' ||
+    item.kind === 'text'
+      ? item.kind
+      : 'document';
+  const previewDataUrl =
+    typeof item.previewDataUrl === 'string' && item.previewDataUrl.startsWith('data:image/')
+      ? item.previewDataUrl
+      : undefined;
+
+  return {
+    id:
+      typeof item.id === 'string' && item.id.trim()
+        ? item.id
+        : `att-${Math.random().toString(36).slice(2, 8)}`,
+    name: item.name.trim().slice(0, 180),
+    mimeType: typeof item.mimeType === 'string' ? item.mimeType : 'application/octet-stream',
+    sizeBytes:
+      typeof item.sizeBytes === 'number' && Number.isFinite(item.sizeBytes) ? item.sizeBytes : 0,
+    kind,
+    summaryLabel: typeof item.summaryLabel === 'string' ? item.summaryLabel : undefined,
+    extractedText:
+      typeof item.extractedText === 'string' ? item.extractedText.slice(0, 20_000) : undefined,
+    previewDataUrl,
+    pageCount: typeof item.pageCount === 'number' ? item.pageCount : undefined,
+    sheetNames: Array.isArray(item.sheetNames)
+      ? item.sheetNames.filter((s): s is string => typeof s === 'string').slice(0, 20)
+      : undefined,
+    slideCount: typeof item.slideCount === 'number' ? item.slideCount : undefined,
+    truncated: Boolean(item.truncated),
+  };
 }
 
 function sanitizeMessage(raw: unknown): ChatMessage | null {
@@ -130,6 +199,12 @@ function sanitizeMessage(raw: unknown): ChatMessage | null {
         .slice(0, 6)
     : undefined;
 
+  const attachments = Array.isArray(item.attachments)
+    ? item.attachments
+        .map(sanitizeStoredAttachment)
+        .filter((a): a is MessageAttachment => a !== null)
+    : undefined;
+
   return {
     id:
       typeof item.id === 'string' && item.id.trim()
@@ -141,6 +216,7 @@ function sanitizeMessage(raw: unknown): ChatMessage | null {
       typeof item.createdAt === 'number' && Number.isFinite(item.createdAt)
         ? item.createdAt
         : Date.now(),
+    attachments: attachments && attachments.length > 0 ? attachments : undefined,
     followUpQuestions: followUpQuestions && followUpQuestions.length > 0 ? followUpQuestions : undefined,
     sources: sources && sources.length > 0 ? sources : undefined,
     isError: Boolean(item.isError),
@@ -154,6 +230,10 @@ export function computeLastMessagePreview(messages: ChatMessage[]): string | und
     const content = messages[i]?.content?.replace(/\s+/g, ' ').trim();
     if (content) {
       return content.length > 90 ? `${content.slice(0, 89)}…` : content;
+    }
+    const attName = messages[i]?.attachments?.[0]?.name;
+    if (attName) {
+      return `Attached: ${attName}`.slice(0, 90);
     }
   }
   return undefined;
@@ -202,11 +282,18 @@ export function sanitizeConversations(raw: unknown): Conversation[] {
 }
 
 export function exportConversationsAsJson(conversations: Conversation[]): string {
+  const cleanConvs = conversations.map((conv) => ({
+    ...conv,
+    messages: conv.messages.map((msg) => ({
+      ...msg,
+      attachments: msg.attachments?.map(({ inlineImageBase64: _b64, ...rest }) => rest),
+    })),
+  }));
   const payload: ExportPayload = {
     app: 'Consul AI',
     version: 1,
     exportedAt: new Date().toISOString(),
-    conversations,
+    conversations: cleanConvs,
   };
   return JSON.stringify(payload, null, 2);
 }
@@ -225,7 +312,11 @@ export function exportConversationsAsTxt(conversations: Conversation[]): string 
           hour: '2-digit',
           minute: '2-digit',
         });
-        let block = `[${time}] ${speaker}:\n${msg.content}`;
+        const attLine =
+          msg.attachments && msg.attachments.length > 0
+            ? `[Attachments: ${msg.attachments.map((a) => a.name).join(', ')}]\n`
+            : '';
+        let block = `[${time}] ${speaker}:\n${attLine}${msg.content}`;
         if (msg.followUpQuestions && msg.followUpQuestions.length > 0) {
           block += `\n\nSuggested follow-ups:\n${msg.followUpQuestions
             .map((q, idx) => `  ${idx + 1}. ${q}`)

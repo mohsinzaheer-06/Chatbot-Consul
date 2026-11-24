@@ -1,43 +1,34 @@
-import { ArrowUpRight, Globe2 } from 'lucide-react';
+import { Code2, Compass, Globe2, Lightbulb, PenLine } from 'lucide-react';
 import { motion } from 'motion/react';
 import { detectTextDirection } from '../lib/language';
+import { ConsulLogo } from './ConsulLogo';
 
-interface StarterPrompt {
-  label: string;
+interface StarterSuggestion {
+  category: string;
   prompt: string;
-  languageLabel: string;
-  accentClass: string;
-  cardHoverClass: string;
+  icon: typeof Lightbulb;
 }
 
-const STARTER_PROMPTS: StarterPrompt[] = [
+const STARTER_SUGGESTIONS: StarterSuggestion[] = [
   {
-    languageLabel: 'Live Web · Local',
-    label: 'Time, weather & top news',
-    prompt: 'What is the current local time, weather, and top headlines for my location today?',
-    accentClass: 'text-sky-700 dark:text-sky-400',
-    cardHoverClass: 'hover:border-sky-500/60 hover:bg-sky-50/60 dark:hover:border-sky-400/50 dark:hover:bg-sky-950/30',
+    category: 'Learn something new',
+    prompt: 'Explain how compound interest and inflation affect everyday savings in simple terms.',
+    icon: Lightbulb,
   },
   {
-    languageLabel: 'Roman Urdu',
-    label: 'Tech guidance in Roman Urdu',
-    prompt: 'Mujhe Next.js aur React ka farq simple Roman Urdu mein samjhao.',
-    accentClass: 'text-emerald-700 dark:text-emerald-400',
-    cardHoverClass: 'hover:border-emerald-500/60 hover:bg-emerald-50/60 dark:hover:border-emerald-400/50 dark:hover:bg-emerald-950/30',
-  },
-  {
-    languageLabel: 'اردو',
-    label: 'کاروباری مشورہ',
-    prompt: 'چھوٹا کاروبار شروع کرنے کے تین اہم مراحل مختصر اور آسان الفاظ میں بتائیں۔',
-    accentClass: 'text-violet-700 dark:text-violet-400',
-    cardHoverClass: 'hover:border-violet-500/60 hover:bg-violet-50/60 dark:hover:border-violet-400/50 dark:hover:bg-violet-950/30',
-  },
-  {
-    languageLabel: 'English',
-    label: 'Executive communication',
+    category: 'Write and create',
     prompt: 'Write a polite, concise email to reschedule a client meeting to next Tuesday.',
-    accentClass: 'text-amber-700 dark:text-amber-400',
-    cardHoverClass: 'hover:border-amber-500/60 hover:bg-amber-50/60 dark:hover:border-amber-400/50 dark:hover:bg-amber-950/30',
+    icon: PenLine,
+  },
+  {
+    category: 'Solve a problem',
+    prompt: 'Mujhe Next.js aur React ka farq simple Roman Urdu mein samjhao.',
+    icon: Compass,
+  },
+  {
+    category: 'Develop something',
+    prompt: 'Design a clean folder structure and REST API plan for a small task-tracking web app.',
+    icon: Code2,
   },
 ];
 
@@ -55,65 +46,50 @@ export function WelcomeScreen({ detectedContext, onSelectPrompt }: WelcomeScreen
     : detectedContext.timezone;
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col justify-center px-4 py-10 sm:px-6">
+    <div className="mx-auto flex w-full max-w-[740px] flex-1 flex-col justify-center px-5 py-8 sm:px-8 sm:py-12">
       <motion.div
-        initial={{ opacity: 0, y: 10 }}
+        initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
-        className="mb-8 max-w-xl"
+        transition={{ duration: 0.24, ease: [0.16, 1, 0.3, 1] }}
+        className="mb-8 sm:mb-10"
       >
-        <div className="mb-4 inline-flex h-12 w-12 items-center justify-center rounded-2xl border border-zinc-900/15 bg-[#D9F99D] text-zinc-950 shadow-[0_2px_0_0_rgba(24,24,27,0.12)] dark:border-emerald-400/30 dark:bg-emerald-400/15 dark:text-emerald-300 dark:shadow-none">
-          <svg
-            viewBox="0 0 24 24"
-            className="h-5 w-5"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            aria-hidden="true"
-          >
-            <path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v7a2.5 2.5 0 0 1-2.5 2.5H10l-4.5 3.5V16H6.5A2.5 2.5 0 0 1 4 13.5v-7Z" />
-            <path d="M8.5 9.5h7M8.5 12.5h4.5" strokeLinecap="round" />
-          </svg>
+        <div className="mb-5 inline-flex h-10 w-10 items-center justify-center rounded-xl border border-black/[0.08] bg-white text-[#3D6B58] shadow-xs dark:border-white/[0.1] dark:bg-[#1D1F23] dark:text-[#7CC0A3]">
+          <ConsulLogo className="h-5 w-5" />
         </div>
 
-        <h1 className="font-display text-3xl font-bold tracking-tight text-zinc-950 sm:text-4xl dark:text-white [text-wrap:balance]">
-          Sharp answers. Real-time web. Any language.
+        <h1 className="font-display text-2xl font-semibold tracking-tight text-[#18191B] sm:text-3xl dark:text-[#ECECEF] [text-wrap:balance]">
+          Good to see you.
         </h1>
-
-        <p className="mt-3 text-[15px] leading-relaxed text-zinc-600 dark:text-zinc-300">
-          Consul AI detects your language, time zone, and live web facts automatically—ready whenever you want to plan, learn, or create.
+        <p className="mt-1.5 text-base font-normal text-[#5C6066] sm:text-lg dark:text-[#9CA1A8] [text-wrap:balance]">
+          What would you like to explore today?
         </p>
 
-        <div className="mt-3.5 flex items-center gap-2 text-xs font-medium text-sky-700 dark:text-sky-300">
-          <Globe2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+        <div className="mt-4 flex items-center gap-2 text-xs text-[#6E737B] dark:text-[#8E939C]">
+          <Globe2 className="h-3.5 w-3.5 shrink-0 text-[#3D6B58] dark:text-[#7CC0A3]" aria-hidden="true" />
           <span className="truncate">Live web grounding active · {contextLine}</span>
         </div>
       </motion.div>
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        {STARTER_PROMPTS.map((item, idx) => {
+      <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 sm:gap-3">
+        {STARTER_SUGGESTIONS.map((item, idx) => {
+          const Icon = item.icon;
           const dir = detectTextDirection(item.prompt);
           return (
             <motion.button
-              key={item.prompt}
+              key={item.category}
               type="button"
-              initial={{ opacity: 0, y: 10 }}
+              initial={{ opacity: 0, y: 8 }}
               animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.24, delay: idx * 0.04, ease: [0.16, 1, 0.3, 1] }}
+              transition={{ duration: 0.2, delay: idx * 0.035, ease: [0.16, 1, 0.3, 1] }}
               onClick={() => onSelectPrompt(item.prompt)}
               dir={dir}
-              className={`group flex flex-col justify-between rounded-2xl border border-zinc-900/12 bg-white p-4 text-start shadow-[0_2px_0_0_rgba(24,24,27,0.06)] transition-all hover:-translate-y-0.5 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 dark:border-white/10 dark:bg-[#111520] dark:shadow-none ${item.cardHoverClass}`}
+              className="group flex min-h-[44px] flex-col items-start rounded-2xl border border-black/[0.08] bg-white/75 px-4 py-3.5 text-start transition-colors hover:border-[#3D6B58]/35 hover:bg-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#3D6B58] dark:border-white/[0.08] dark:bg-[#1B1C1F]/70 dark:hover:border-[#6BA588]/40 dark:hover:bg-[#1D1F23]"
             >
-              <div className="flex w-full items-center justify-between gap-2 text-xs">
-                <span className={`font-semibold tracking-tight ${item.accentClass}`}>
-                  {item.languageLabel} · {item.label}
-                </span>
-                <ArrowUpRight
-                  className="h-4 w-4 shrink-0 text-zinc-400 transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-zinc-950 dark:group-hover:text-white"
-                  aria-hidden="true"
-                />
+              <div className="flex items-center gap-2 text-xs font-medium text-[#3D6B58] dark:text-[#7CC0A3]">
+                <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                <span>{item.category}</span>
               </div>
-              <span className="mt-2.5 text-sm font-medium leading-snug text-zinc-900 dark:text-zinc-100">
+              <span className="mt-1.5 line-clamp-2 text-[13.5px] leading-relaxed text-[#3F4349] transition-colors group-hover:text-[#18191B] dark:text-[#B9BEC6] dark:group-hover:text-white">
                 {item.prompt}
               </span>
             </motion.button>

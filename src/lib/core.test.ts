@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import JSZip from 'jszip';
+import * as XLSX from 'xlsx';
 import { detectTextDirection, generateConversationTitle } from './language';
 import {
   createStreamAccumulator,
@@ -9,8 +11,21 @@ import {
 import {
   buildSystemInstruction,
   resolveEligibleModel,
+  sanitizeAttachments,
   validateChatRequest,
 } from './chatValidation';
+import {
+  extractCsvSummary,
+  extractLegacyDocText,
+  extractPptxSlidesFromBuffer,
+  extractXlsxWorkbookFromBuffer,
+  parseCsvRows,
+} from './fileProcessor';
+import {
+  IMAGE_UNAVAILABLE_MESSAGE,
+  resolveConfiguredImageModel,
+  resolveLiveModel,
+} from './models';
 import {
   computeLastMessagePreview,
   exportConversationsAsJson,
@@ -27,6 +42,10 @@ import {
   normalizeIpCandidate,
 } from '../../server/location';
 import { extractGroundingSourcesFromChunk } from '../../server/gemini';
+import {
+  getImageProviderAvailability,
+  validateImageGenerationRequest,
+} from '../../server/imageProvider';
 import type { GroundingSource } from '../types/chat';
 
 test('detectTextDirection identifies Urdu RTL vs English and Roman Urdu LTR', () => {
@@ -88,10 +107,28 @@ test('parseFollowUpSection handles fenced JSON and numbered list fallbacks', () 
   assert.deepEqual(split.followUps, ['A?', 'B?', 'C?']);
 });
 
-test('validateChatRequest rejects empty or oversized messages and caps history', () => {
+test('validateChatRequest rejects empty or oversized messages and caps history, defaulting responseLength to balanced', () => {
   assert.equal(validateChatRequest(null).ok, false);
   assert.equal(validateChatRequest({ message: '   ' }).ok, false);
   assert.equal(validateChatRequest({ message: 'a'.repeat(9000) }).ok, false);
+
+  const defReq = validateChatRequest({ message: 'Hello' });
+  assert.equal(defReq.ok, true);
+  if (defReq.ok) {
+    assert.equal(defReq.data.responseLength, 'balanced');
+  }
+
+  const quickReq = validateChatRequest({ message: 'Hello', responseLength: 'quick' });
+  assert.equal(quickReq.ok, true);
+  if (quickReq.ok) {
+    assert.equal(quickReq.data.responseLength, 'quick');
+  }
+
+  const detailedReq = validateChatRequest({ message: 'Hello', responseLength: 'detailed' });
+  assert.equal(detailedReq.ok, true);
+  if (detailedReq.ok) {
+    assert.equal(detailedReq.data.responseLength, 'detailed');
+  }
 
   const manyTurns = Array.from({ length: 30 }, (_, i) => ({
     role: i % 2 === 0 ? 'user' : 'model',
@@ -241,3 +278,197 @@ test('buildSystemInstruction injects detected user location and timezone context
   assert.ok(prompt.includes('Asia/Karachi'));
   assert.ok(prompt.includes('Monday, November 23, 2026'));
 });
+
+test('validateChatRequest and buildSystemInstruction handle preferredLanguage safely', () => {
+  const valid = validateChatRequest({
+    message: 'Explain compound interest',
+    history: [],
+    responseLength: 'concise',
+    preferredLanguage: 'ur',
+  });
+  assert.equal(valid.ok, true);
+  if (valid.ok) {
+    assert.equal(valid.data.preferredLanguage, 'ur');
+  }
+
+  const fallback = validateChatRequest({
+    message: 'Hello',
+    history: [],
+    preferredLanguage: 'invalid-lang',
+  });
+  assert.equal(fallback.ok, true);
+  if (fallback.ok) {
+    assert.equal(fallback.data.preferredLanguage, 'auto');
+  }
+
+  const urPrompt = buildSystemInstruction('concise', undefined, undefined, 'ur');
+  assert.ok(urPrompt.includes('Urdu script'));
+  const romanPrompt = buildSystemInstruction('concise', undefined, undefined, 'roman-ur');
+  assert.ok(romanPrompt.includes('Roman Urdu'));
+});
+
+test('parseCsvRows and extractCsvSummary parse quoted commas, newlines, and markdown tables', () => {
+  const csv = 'Name,Role,Note\n"Ayla, Khan",Analyst,"Line 1\nLine 2"\nNoor,Engineer,Ready';
+  const rows = parseCsvRows(csv);
+  assert.equal(rows.length, 3);
+  assert.equal(rows[1][0], 'Ayla, Khan');
+  assert.equal(rows[1][2], 'Line 1\nLine 2');
+
+  const summary = extractCsvSummary(csv);
+  assert.equal(summary.rowCount, 3);
+  assert.ok(summary.text.includes('CSV Rows: 3 · Columns: 3'));
+  assert.ok(summary.text.includes('| Name | Role | Note |'));
+  assert.ok(summary.text.includes('Ayla, Khan'));
+});
+
+test('extractXlsxWorkbookFromBuffer reads multi-sheet Excel workbooks locally', () => {
+  const wb = XLSX.utils.book_new();
+  const s1 = XLSX.utils.aoa_to_sheet([
+    ['Quarter', 'Revenue', 'Region'],
+    ['Q1', 125000, 'Karachi'],
+    ['Q2', 148000, 'Lahore'],
+  ]);
+  const s2 = XLSX.utils.aoa_to_sheet([
+    ['Team', 'Headcount'],
+    ['Product', 8],
+  ]);
+  XLSX.utils.book_append_sheet(wb, s1, 'Sales');
+  XLSX.utils.book_append_sheet(wb, s2, 'Team');
+
+  const raw = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer;
+  const extracted = extractXlsxWorkbookFromBuffer(raw);
+  assert.deepEqual(extracted.sheetNames, ['Sales', 'Team']);
+  assert.equal(extracted.totalRows, 5);
+  assert.ok(extracted.text.includes('### Worksheet: Sales (3 rows, 3 columns)'));
+  assert.ok(extracted.text.includes('| Q1 | 125000 | Karachi |'));
+  assert.ok(extracted.text.includes('### Worksheet: Team (2 rows, 2 columns)'));
+});
+
+test('extractPptxSlidesFromBuffer extracts slide order and speaker notes locally', async () => {
+  const zip = new JSZip();
+  zip.file(
+    'ppt/slides/slide2.xml',
+    '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:p><a:t>Second Slide Summary</a:t></a:p></p:sld>'
+  );
+  zip.file(
+    'ppt/slides/slide1.xml',
+    '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:p><a:t>Consul AI Pitch Deck</a:t></a:p><a:p><a:t>Multimodal Roadmap</a:t></a:p></p:sld>'
+  );
+  zip.file(
+    'ppt/notesSlides/notesSlide1.xml',
+    '<p:notes xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:p><a:t>Emphasize strictly free architecture.</a:t></a:p></p:notes>'
+  );
+
+  const buf = await zip.generateAsync({ type: 'arraybuffer' });
+  const result = await extractPptxSlidesFromBuffer(buf);
+  assert.equal(result.slideCount, 2);
+  assert.ok(result.text.indexOf('[Slide 1]') < result.text.indexOf('[Slide 2]'));
+  assert.ok(result.text.includes('Consul AI Pitch Deck'));
+  assert.ok(result.text.includes('Speaker notes: Emphasize strictly free architecture.'));
+  assert.ok(result.text.includes('Second Slide Summary'));
+});
+
+test('extractLegacyDocText recovers readable text from binary .doc bytes or explains fallback', () => {
+  const sampleBytes = new TextEncoder().encode('\x00\x01Quarterly Memo: Budget approved for Q4.\x00\x02');
+  const res = extractLegacyDocText(sampleBytes.buffer);
+  assert.ok(res.text.includes('Quarterly Memo: Budget approved for Q4.'));
+
+  const emptyBytes = new Uint8Array([0, 1, 2, 3]);
+  const fallback = extractLegacyDocText(emptyBytes.buffer);
+  assert.ok(fallback.text.includes('legacy binary .doc'));
+});
+
+test('sanitizeAttachments and validateChatRequest enforce multimodal limits and allow attachment-only sends', () => {
+  const tooMany = sanitizeAttachments(
+    Array.from({ length: 5 }, (_, i) => ({
+      id: `a${i}`,
+      name: `doc${i}.txt`,
+      mimeType: 'text/plain',
+      sizeBytes: 100,
+      kind: 'text',
+      extractedText: 'Sample',
+    }))
+  );
+  assert.ok(tooMany.error);
+
+  const badBase64 = sanitizeAttachments([
+    {
+      id: 'img1',
+      name: 'photo.png',
+      mimeType: 'image/png',
+      sizeBytes: 100,
+      kind: 'image',
+      inlineImageBase64: 'not!valid!base64***',
+    },
+  ]);
+  assert.ok(badBase64.error);
+
+  const attachmentOnly = validateChatRequest({
+    message: '   ',
+    attachments: [
+      {
+        id: 'att1',
+        name: 'report.pdf',
+        mimeType: 'application/pdf',
+        sizeBytes: 1024,
+        kind: 'document',
+        extractedText: 'Revenue grew 14% year-over-year.',
+      },
+    ],
+  });
+  assert.equal(attachmentOnly.ok, true);
+  if (attachmentOnly.ok) {
+    assert.equal(attachmentOnly.data.attachments?.length, 1);
+    assert.equal(attachmentOnly.data.attachments?.[0].name, 'report.pdf');
+  }
+});
+
+test('resolveLiveModel, resolveConfiguredImageModel, and getImageProviderAvailability enforce strict free-only policy', () => {
+  assert.equal(resolveLiveModel(undefined), 'gemini-3.8-live');
+  assert.equal(resolveLiveModel('gemini-1.5-flash'), 'gemini-3.8-live');
+  assert.equal(resolveLiveModel('gemini-3.8-live'), 'gemini-3.8-live');
+
+  assert.deepEqual(resolveConfiguredImageModel(''), { model: undefined, isPaidModel: false });
+  assert.deepEqual(resolveConfiguredImageModel('gemini-3.1-flash-lite-image'), {
+    model: 'gemini-3.1-flash-lite-image',
+    isPaidModel: true,
+  });
+  assert.deepEqual(resolveConfiguredImageModel('gemini-nano-banana-2.1'), {
+    model: 'gemini-nano-banana-2.1',
+    isPaidModel: true,
+  });
+
+  const prevHf = process.env.HF_API_TOKEN;
+  const prevGeminiImg = process.env.GEMINI_IMAGE_MODEL;
+  const prevAllowPaid = process.env.ALLOW_PAID_IMAGE_MODEL;
+  try {
+    delete process.env.HF_API_TOKEN;
+    process.env.GEMINI_IMAGE_MODEL = 'gemini-3.1-flash-lite-image';
+    delete process.env.ALLOW_PAID_IMAGE_MODEL;
+
+    const status = getImageProviderAvailability();
+    assert.equal(status.available, true);
+    assert.equal(status.provider, 'pollinations');
+  } finally {
+    if (prevHf !== undefined) process.env.HF_API_TOKEN = prevHf;
+    else delete process.env.HF_API_TOKEN;
+    if (prevGeminiImg !== undefined) process.env.GEMINI_IMAGE_MODEL = prevGeminiImg;
+    else delete process.env.GEMINI_IMAGE_MODEL;
+    if (prevAllowPaid !== undefined) process.env.ALLOW_PAID_IMAGE_MODEL = prevAllowPaid;
+    else delete process.env.ALLOW_PAID_IMAGE_MODEL;
+  }
+
+  const reqCheck = validateImageGenerationRequest({
+    prompt: 'Minimalist studio headphones on stone',
+    style: 'product-photography',
+    aspectRatio: '16:9',
+    count: 2,
+  });
+  assert.equal(reqCheck.ok, true);
+  if (reqCheck.ok) {
+    assert.equal(reqCheck.data.count, 2);
+    assert.equal(reqCheck.data.aspectRatio, '16:9');
+  }
+});
+
+

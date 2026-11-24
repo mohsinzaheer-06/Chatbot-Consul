@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { formatAttachmentsForPrompt } from '../lib/chatValidation';
 import {
   clearAllDbTx,
   deleteConversationTx,
@@ -22,11 +23,15 @@ import {
   saveSettings,
 } from '../lib/storage';
 import type {
+  ApiStatusSnapshot,
   ChatHistoryTurn,
   ChatMessage,
   Conversation,
   EligibleModel,
   GroundingSource,
+  LiveVoiceName,
+  MessageAttachment,
+  PreferredLanguage,
   ResponseLength,
   ThemeMode,
   UserSettings,
@@ -62,6 +67,7 @@ export function useChatStore() {
   const [storageWarning, setStorageWarning] = useState<string | null>(null);
   const [focusInputSignal, setFocusInputSignal] = useState(0);
   const [isDbReady, setIsDbReady] = useState(false);
+  const [apiStatus, setApiStatus] = useState<ApiStatusSnapshot | null>(null);
   const [detectedContext, setDetectedContext] = useState<{
     timezone: string;
     locationLabel?: string;
@@ -81,11 +87,28 @@ export function useChatStore() {
   const isGeneratingRef = useRef(false);
   const generationTokenRef = useRef(0);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const lastSendTimestampRef = useRef(0);
   const conversationsRef = useRef(conversations);
   conversationsRef.current = conversations;
 
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
+
+  const refreshApiStatus = useCallback(async (): Promise<ApiStatusSnapshot | null> => {
+    try {
+      const res = await fetch('/api/health', { cache: 'no-store' });
+      if (!res.ok) return null;
+      const data = (await res.json()) as ApiStatusSnapshot;
+      setApiStatus(data);
+      return data;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshApiStatus();
+  }, [refreshApiStatus]);
 
   // Initialize IndexedDB (with automatic one-time migration from localStorage)
   useEffect(() => {
@@ -97,7 +120,6 @@ export function useChatStore() {
       setIsDbReady(true);
 
       if (hasMutatedBeforeLoadRef.current) {
-        // Persist any early mutation made before IDB opened
         if (result.usingIndexedDb && conversationsRef.current.length > 0) {
           await upsertManyConversationsTx(conversationsRef.current);
         }
@@ -196,7 +218,11 @@ export function useChatStore() {
     if (!q) return conversations;
     return conversations.filter((conv) => {
       if (conv.title.toLowerCase().includes(q)) return true;
-      return conv.messages.some((m) => m.content.toLowerCase().includes(q));
+      return conv.messages.some(
+        (m) =>
+          m.content.toLowerCase().includes(q) ||
+          m.attachments?.some((a) => a.name.toLowerCase().includes(q))
+      );
     });
   }, [conversations, searchQuery]);
 
@@ -210,6 +236,18 @@ export function useChatStore() {
 
   const updateModel = useCallback((model: EligibleModel) => {
     setSettings((prev) => ({ ...prev, model }));
+  }, []);
+
+  const updatePreferredLanguage = useCallback((preferredLanguage: PreferredLanguage) => {
+    setSettings((prev) => ({ ...prev, preferredLanguage }));
+  }, []);
+
+  const updateLiveVoiceName = useCallback((liveVoiceName: LiveVoiceName) => {
+    setSettings((prev) => ({ ...prev, liveVoiceName }));
+  }, []);
+
+  const updateMaxUploadMb = useCallback((maxUploadMb: number) => {
+    setSettings((prev) => ({ ...prev, maxUploadMb }));
   }, []);
 
   const stopGeneration = useCallback(() => {
@@ -357,14 +395,29 @@ export function useChatStore() {
     [activeConversationId, markDirty, stopGeneration]
   );
 
+  const buildHistoryPayload = (messages: ChatMessage[]): ChatHistoryTurn[] =>
+    messages
+      .filter((m) => !m.isError && (m.content.trim().length > 0 || (m.attachments?.length ?? 0) > 0))
+      .map((m) => {
+        const attText = m.attachments?.length
+          ? formatAttachmentsForPrompt(m.attachments).slice(0, 2500)
+          : '';
+        const combined = attText ? `${m.content}\n\n${attText}` : m.content;
+        return {
+          role: m.role === 'user' ? 'user' : 'model',
+          content: combined,
+        };
+      });
+
   const streamAssistantTurn = useCallback(
     async (params: {
       conversationId: string;
       userMessageText: string;
+      attachments?: MessageAttachment[];
       history: ChatHistoryTurn[];
       assistantMsgId: string;
     }) => {
-      const { conversationId, userMessageText, history, assistantMsgId } = params;
+      const { conversationId, userMessageText, attachments, history, assistantMsgId } = params;
       const myToken = ++generationTokenRef.current;
       const controller = new AbortController();
       abortControllerRef.current = controller;
@@ -385,13 +438,30 @@ export function useChatStore() {
           // Ignore environments without Intl/navigator
         }
 
+        const wireAttachments = attachments?.map((att) => ({
+          id: att.id,
+          name: att.name,
+          mimeType: att.mimeType,
+          sizeBytes: att.sizeBytes,
+          kind: att.kind,
+          summaryLabel: att.summaryLabel,
+          extractedText: att.extractedText,
+          inlineImageBase64: att.inlineImageBase64,
+          pageCount: att.pageCount,
+          sheetNames: att.sheetNames,
+          slideCount: att.slideCount,
+          truncated: att.truncated,
+        }));
+
         const response = await fetch('/api/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             message: userMessageText,
             history,
+            attachments: wireAttachments && wireAttachments.length > 0 ? wireAttachments : undefined,
             responseLength: settingsRef.current.responseLength,
+            preferredLanguage: settingsRef.current.preferredLanguage,
             model: settingsRef.current.model,
             clientContext: {
               timezone: clientTimezone,
@@ -609,15 +679,32 @@ export function useChatStore() {
   );
 
   const sendMessage = useCallback(
-    async (rawText: string) => {
+    async (rawText: string, attachments?: MessageAttachment[]) => {
       const trimmed = rawText.trim();
-      if (!trimmed || isGeneratingRef.current) return;
+      const hasAtt = Boolean(attachments && attachments.length > 0);
+      if ((!trimmed && !hasAtt) || isGeneratingRef.current) return;
+
+      // Gentle free-tier throttle guard (900ms cooldown)
+      const nowMs = Date.now();
+      if (nowMs - lastSendTimestampRef.current < 900) {
+        setErrorState({
+          message: 'Please pause a moment before sending another message.',
+          retryable: false,
+        });
+        return;
+      }
+      lastSendTimestampRef.current = nowMs;
+
+      const effectivePrompt =
+        trimmed ||
+        `Please analyze the attached file${(attachments?.length ?? 0) > 1 ? 's' : ''}.`;
 
       const now = Date.now();
       const userMsg: ChatMessage = {
         id: createId('msg'),
         role: 'user',
-        content: trimmed,
+        content: effectivePrompt,
+        attachments: hasAtt ? attachments : undefined,
         createdAt: now,
       };
       const assistantMsg: ChatMessage = {
@@ -627,13 +714,15 @@ export function useChatStore() {
         createdAt: now + 1,
       };
 
+      const titleSeed = trimmed || attachments?.[0]?.name || 'File analysis';
+
       let targetConversationId = activeConversationId;
       let priorHistory: ChatHistoryTurn[] = [];
 
       if (!targetConversationId) {
         const newConv: Conversation = {
           id: createId('conv'),
-          title: generateConversationTitle(trimmed),
+          title: generateConversationTitle(titleSeed),
           createdAt: now,
           updatedAt: now,
           lastMessagePreview: computeLastMessagePreview([userMsg]),
@@ -646,12 +735,7 @@ export function useChatStore() {
       } else {
         const existing = conversationsRef.current.find((c) => c.id === targetConversationId);
         if (existing) {
-          priorHistory = existing.messages
-            .filter((m) => !m.isError && m.content.trim().length > 0)
-            .map((m) => ({
-              role: m.role === 'user' ? 'user' : 'model',
-              content: m.content,
-            }));
+          priorHistory = buildHistoryPayload(existing.messages);
         }
 
         markDirty(targetConversationId);
@@ -662,7 +746,7 @@ export function useChatStore() {
             const nextMessages = [...c.messages, userMsg, assistantMsg];
             return {
               ...c,
-              title: shouldRetitle ? generateConversationTitle(trimmed) : c.title,
+              title: shouldRetitle ? generateConversationTitle(titleSeed) : c.title,
               updatedAt: now,
               lastMessagePreview: computeLastMessagePreview(nextMessages),
               messages: nextMessages,
@@ -674,7 +758,8 @@ export function useChatStore() {
 
       await streamAssistantTurn({
         conversationId: targetConversationId,
-        userMessageText: trimmed,
+        userMessageText: effectivePrompt,
+        attachments,
         history: priorHistory,
         assistantMsgId: assistantMsg.id,
       });
@@ -694,12 +779,8 @@ export function useChatStore() {
       if (idx === -1) return;
 
       const priorMessages = conv.messages.slice(0, idx);
-      const priorHistory: ChatHistoryTurn[] = priorMessages
-        .filter((m) => !m.isError && m.content.trim().length > 0)
-        .map((m) => ({
-          role: m.role === 'user' ? 'user' : 'model',
-          content: m.content,
-        }));
+      const priorHistory = buildHistoryPayload(priorMessages);
+      const existingAttachments = conv.messages[idx].attachments;
 
       const updatedUserMsg: ChatMessage = {
         ...conv.messages[idx],
@@ -732,6 +813,7 @@ export function useChatStore() {
       await streamAssistantTurn({
         conversationId,
         userMessageText: trimmed,
+        attachments: existingAttachments,
         history: priorHistory,
         assistantMsgId: newAssistantMsg.id,
       });
@@ -753,13 +835,7 @@ export function useChatStore() {
     if (lastUserIdx === -1) return;
 
     const lastUserMessage = messages[lastUserIdx];
-    const priorHistory: ChatHistoryTurn[] = messages
-      .slice(0, lastUserIdx)
-      .filter((m) => !m.isError && m.content.trim().length > 0)
-      .map((m) => ({
-        role: m.role === 'user' ? 'user' : 'model',
-        content: m.content,
-      }));
+    const priorHistory = buildHistoryPayload(messages.slice(0, lastUserIdx));
 
     const newAssistantMsg: ChatMessage = {
       id: createId('msg'),
@@ -786,6 +862,7 @@ export function useChatStore() {
     await streamAssistantTurn({
       conversationId: activeConversation.id,
       userMessageText: lastUserMessage.content,
+      attachments: lastUserMessage.attachments,
       history: priorHistory,
       assistantMsgId: newAssistantMsg.id,
     });
@@ -796,13 +873,7 @@ export function useChatStore() {
     const messages = activeConversation.messages;
     const lastMsg = messages[messages.length - 1];
     if (lastMsg?.role === 'user') {
-      const priorHistory: ChatHistoryTurn[] = messages
-        .slice(0, -1)
-        .filter((m) => !m.isError && m.content.trim().length > 0)
-        .map((m) => ({
-          role: m.role === 'user' ? 'user' : 'model',
-          content: m.content,
-        }));
+      const priorHistory = buildHistoryPayload(messages.slice(0, -1));
 
       const newAssistantMsg: ChatMessage = {
         id: createId('msg'),
@@ -829,6 +900,7 @@ export function useChatStore() {
       await streamAssistantTurn({
         conversationId: activeConversation.id,
         userMessageText: lastMsg.content,
+        attachments: lastMsg.attachments,
         history: priorHistory,
         assistantMsgId: newAssistantMsg.id,
       });
@@ -837,6 +909,37 @@ export function useChatStore() {
 
     await regenerateLastResponse();
   }, [activeConversation, markDirty, regenerateLastResponse, streamAssistantTurn]);
+
+  const saveVoiceTranscriptToChat = useCallback(
+    (entries: Array<{ role: 'user' | 'assistant'; text: string }>, model?: string) => {
+      const valid = entries.filter((e) => e.text.trim().length > 0);
+      if (valid.length === 0) return;
+
+      const now = Date.now();
+      const chatMessages: ChatMessage[] = valid.map((e, idx) => ({
+        id: createId('msg'),
+        role: e.role,
+        content: e.text.trim(),
+        createdAt: now + idx,
+        model: e.role === 'assistant' ? model : undefined,
+      }));
+
+      const titleSeed =
+        valid.find((e) => e.role === 'user')?.text ?? 'Voice conversation';
+      const newConv: Conversation = {
+        id: createId('conv'),
+        title: `Voice: ${generateConversationTitle(titleSeed)}`.slice(0, 80),
+        createdAt: now,
+        updatedAt: now,
+        lastMessagePreview: computeLastMessagePreview(chatMessages),
+        messages: chatMessages,
+      };
+      markDirty(newConv.id);
+      setConversations((prev) => [newConv, ...prev]);
+      setActiveConversationId(newConv.id);
+    },
+    [markDirty]
+  );
 
   const exportJson = useCallback(() => {
     const content = exportConversationsAsJson(conversations);
@@ -893,9 +996,14 @@ export function useChatStore() {
     errorState,
     clearError: () => setErrorState(null),
     storageWarning,
+    apiStatus,
+    refreshApiStatus,
     updateTheme,
     updateResponseLength,
     updateModel,
+    updatePreferredLanguage,
+    updateLiveVoiceName,
+    updateMaxUploadMb,
     createNewChat,
     selectConversation,
     renameConversation,
@@ -909,6 +1017,7 @@ export function useChatStore() {
     stopGeneration,
     regenerateLastResponse,
     retryLastError,
+    saveVoiceTranscriptToChat,
     exportJson,
     exportTxt,
     importJson,

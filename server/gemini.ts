@@ -1,6 +1,7 @@
-import { GoogleGenAI, ThinkingLevel, type Content } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, type Content, type Part } from '@google/genai';
 import {
   buildSystemInstruction,
+  formatAttachmentsForPrompt,
   resolveEligibleModel,
 } from '../src/lib/chatValidation';
 import { fetchLiveWebFallback, needsLiveWebSearch } from './webFallback';
@@ -8,6 +9,8 @@ import type {
   ChatHistoryTurn,
   EligibleModel,
   GroundingSource,
+  MessageAttachment,
+  PreferredLanguage,
   ResponseLength,
   UserLocationContext,
 } from '../src/types/chat';
@@ -25,7 +28,7 @@ export function isApiKeyConfigured(): boolean {
   return Boolean(key && key !== 'MY_GEMINI_API_KEY');
 }
 
-function getGeminiClient(): GoogleGenAI {
+export function getGeminiClient(apiVersion?: string): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY?.trim();
   if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
     throw new Error('MISSING_API_KEY');
@@ -33,6 +36,7 @@ function getGeminiClient(): GoogleGenAI {
   return new GoogleGenAI({
     apiKey,
     httpOptions: {
+      ...(apiVersion ? { apiVersion } : {}),
       timeout: 25_000,
       headers: {
         'User-Agent': 'aistudio-build',
@@ -41,9 +45,38 @@ function getGeminiClient(): GoogleGenAI {
   });
 }
 
+export function buildUserMessageParts(
+  latestMessage: string,
+  attachments?: MessageAttachment[]
+): Part[] {
+  const parts: Part[] = [];
+  const docContext = formatAttachmentsForPrompt(attachments);
+  const fullText = docContext
+    ? `${latestMessage}\n\n--- ATTACHED FILES DATA ---\n${docContext}`
+    : latestMessage;
+
+  parts.push({ text: fullText });
+
+  if (attachments) {
+    for (const att of attachments) {
+      if (att.inlineImageBase64) {
+        parts.push({
+          inlineData: {
+            data: att.inlineImageBase64,
+            mimeType: att.mimeType === 'image/jpg' ? 'image/jpeg' : att.mimeType || 'image/jpeg',
+          },
+        });
+      }
+    }
+  }
+
+  return parts;
+}
+
 export function normalizeGeminiContents(
   history: ChatHistoryTurn[],
-  latestMessage: string
+  latestMessage: string,
+  attachments?: MessageAttachment[]
 ): Content[] {
   const normalized: Content[] = [];
 
@@ -64,11 +97,16 @@ export function normalizeGeminiContents(
     }
   }
 
+  const latestParts = buildUserMessageParts(latestMessage, attachments);
   const last = normalized[normalized.length - 1];
   if (last && last.role === 'user' && last.parts?.[0]?.text) {
-    last.parts[0].text = `${last.parts[0].text}\n\n${latestMessage}`;
+    const firstLatestText = latestParts[0]?.text ?? latestMessage;
+    last.parts[0].text = `${last.parts[0].text}\n\n${firstLatestText}`;
+    for (const extraPart of latestParts.slice(1)) {
+      last.parts.push(extraPart);
+    }
   } else {
-    normalized.push({ role: 'user', parts: [{ text: latestMessage }] });
+    normalized.push({ role: 'user', parts: latestParts });
   }
 
   return normalized;
@@ -80,8 +118,9 @@ export function extractGroundingSourcesFromChunk(
   collected: GroundingSource[]
 ): void {
   if (!chunk || typeof chunk !== 'object' || collected.length >= 6) return;
-  const candidate = (chunk as { candidates?: Array<{ groundingMetadata?: { groundingChunks?: unknown[] } }> })
-    .candidates?.[0];
+  const candidate = (
+    chunk as { candidates?: Array<{ groundingMetadata?: { groundingChunks?: unknown[] } }> }
+  ).candidates?.[0];
   const groundingChunks = candidate?.groundingMetadata?.groundingChunks;
   if (!Array.isArray(groundingChunks)) return;
 
@@ -234,7 +273,7 @@ export function mapGeminiError(err: unknown): MappedApiError {
       status: 400,
       code: 'BAD_REQUEST',
       message:
-        'The request could not be processed. Please shorten your message or start a new conversation.',
+        'The request could not be processed. Please shorten your message or reduce attachment size.',
       retryable: false,
     };
   }
@@ -306,7 +345,9 @@ async function sleepWithSignal(ms: number, signal: AbortSignal): Promise<void> {
 export async function generateChatStream(params: {
   message: string;
   history: ChatHistoryTurn[];
+  attachments?: MessageAttachment[];
   responseLength: ResponseLength;
+  preferredLanguage?: PreferredLanguage;
   requestedModel?: EligibleModel;
   locationContext?: UserLocationContext;
   signal: AbortSignal;
@@ -321,8 +362,13 @@ export async function generateChatStream(params: {
       'gemini-4-hydrogen',
     ])
   );
-  const allContents = normalizeGeminiContents(params.history, params.message);
+  const allContents = normalizeGeminiContents(
+    params.history,
+    params.message,
+    params.attachments
+  );
   const priorHistory = allContents.slice(0, -1);
+  const latestParts = buildUserMessageParts(params.message, params.attachments);
 
   let cachedFallbackWeb: { webSnippet?: string; sources: GroundingSource[] } | null = null;
   const getFallbackWeb = async () => {
@@ -339,7 +385,8 @@ export async function generateChatStream(params: {
     const systemInstruction = buildSystemInstruction(
       params.responseLength,
       params.locationContext,
-      fallbackWeb.webSnippet
+      fallbackWeb.webSnippet,
+      params.preferredLanguage ?? 'auto'
     );
 
     const toolsConfig = enableSearch ? { tools: [{ googleSearch: {} }] } : {};
@@ -354,14 +401,14 @@ export async function generateChatStream(params: {
           ...toolsConfig,
         };
 
-    if (priorHistory.length > 0) {
+    if (priorHistory.length > 0 && !params.attachments?.some((a) => Boolean(a.inlineImageBase64))) {
       const chat = ai.chats.create({
         model: targetModel,
         history: priorHistory,
         config,
       });
       const stream = await chat.sendMessageStream({
-        message: params.message,
+        message: latestParts[0]?.text ?? params.message,
       });
       return { stream, model: targetModel, fallbackSources: fallbackWeb.sources };
     }
@@ -375,7 +422,8 @@ export async function generateChatStream(params: {
   };
 
   const now = Date.now();
-  const useSearch = needsLiveWebSearch(params.message);
+  const hasAttachments = Boolean(params.attachments && params.attachments.length > 0);
+  const useSearch = !hasAttachments && needsLiveWebSearch(params.message);
   const rawAttempts: Array<{ model: string; search: boolean }> = [];
   if (useSearch) {
     for (const m of candidateModels) {
@@ -407,7 +455,7 @@ export async function generateChatStream(params: {
       continue;
     }
 
-    const timeoutMs = attempt.model === 'gemini-3.8-flash' ? 6000 : attempt.search ? 10_000 : 18_000;
+    const timeoutMs = attempt.model === 'gemini-3.8-flash' ? 8500 : attempt.search ? 12_000 : 20_000;
     try {
       return await withAttemptTimeout(
         openStreamForModel(attempt.model, attempt.search),

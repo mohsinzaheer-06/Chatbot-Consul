@@ -1,7 +1,19 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { GoogleGenAI, ThinkingLevel, Type, type Content } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type, type Content, type Part } from '@google/genai';
+import { generateImagesWithProvider } from '../server/imageProvider';
 
-type ResponseLength = 'concise' | 'balanced' | 'detailed';
+type ResponseLength = 'quick' | 'balanced' | 'detailed' | 'concise';
+type PreferredLanguage = 'auto' | 'en' | 'ur' | 'roman-ur';
+
+interface ChatAttachmentInput {
+  name: string;
+  mimeType: string;
+  kind: string;
+  summaryLabel?: string;
+  extractedText?: string;
+  inlineImageBase64?: string;
+  truncated?: boolean;
+}
 
 interface GroundingSource {
   title: string;
@@ -108,12 +120,12 @@ async function readRequestJson(
       return { ok: true, data: req.body };
     }
     const rawStr = Buffer.isBuffer(req.body) ? req.body.toString('utf8') : String(req.body);
-    if (rawStr.length > 100_000) {
+    if (rawStr.length > 4_000_000) {
       return {
         ok: false,
         status: 413,
         code: 'PAYLOAD_TOO_LARGE',
-        message: 'Request payload is too large. Please shorten your message or start a new chat.',
+        message: 'Request payload is too large. Please reduce attachment size or start a new chat.',
       };
     }
     try {
@@ -134,12 +146,12 @@ async function readRequestJson(
     for await (const chunk of req) {
       const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
       totalBytes += buf.length;
-      if (totalBytes > 100_000) {
+      if (totalBytes > 4_000_000) {
         return {
           ok: false,
           status: 413,
           code: 'PAYLOAD_TOO_LARGE',
-          message: 'Request payload is too large. Please shorten your message or start a new chat.',
+          message: 'Request payload is too large. Please reduce attachment size or start a new chat.',
         };
       }
       chunks.push(buf);
@@ -170,7 +182,9 @@ function validatePayload(body: unknown):
       data: {
         message: string;
         history: ChatHistoryTurn[];
+        attachments?: ChatAttachmentInput[];
         responseLength: ResponseLength;
+        preferredLanguage: PreferredLanguage;
         model?: string;
         clientContext?: ClientContext;
       };
@@ -183,8 +197,56 @@ function validatePayload(body: unknown):
   if (typeof raw.message !== 'string') {
     return { ok: false, error: 'Message is required and must be text.' };
   }
+
+  const attachments: ChatAttachmentInput[] = [];
+  if (Array.isArray(raw.attachments)) {
+    if (raw.attachments.length > 4) {
+      return { ok: false, error: 'Please attach at most 4 files per message.' };
+    }
+    let imageCount = 0;
+    let totalExtractedChars = 0;
+    for (let i = 0; i < raw.attachments.length; i++) {
+      const entry = raw.attachments[i];
+      if (!entry || typeof entry !== 'object') continue;
+      const item = entry as Record<string, unknown>;
+      const name = typeof item.name === 'string' && item.name.trim() ? item.name.trim().slice(0, 180) : `attachment-${i + 1}`;
+      const mimeType = typeof item.mimeType === 'string' && item.mimeType.trim() ? item.mimeType.trim().toLowerCase() : 'application/octet-stream';
+      const kind = typeof item.kind === 'string' ? item.kind : 'document';
+      let inlineImageBase64: string | undefined;
+      if (typeof item.inlineImageBase64 === 'string' && item.inlineImageBase64.trim()) {
+        const cleaned = item.inlineImageBase64.trim().replace(/^data:image\/[a-z0-9.+-]+;base64,/i, '');
+        if (cleaned.length > 3_100_000 || !/^[A-Za-z0-9+/=]+$/.test(cleaned)) {
+          return { ok: false, error: `Image "${name}" is invalid or exceeds size limit.` };
+        }
+        imageCount += 1;
+        if (imageCount > 2) {
+          return { ok: false, error: 'Please attach at most 2 images per message.' };
+        }
+        inlineImageBase64 = cleaned;
+      }
+      let extractedText: string | undefined;
+      if (typeof item.extractedText === 'string' && item.extractedText.trim()) {
+        const remaining = Math.max(0, 42_000 - totalExtractedChars);
+        const cap = Math.min(18_000, remaining);
+        if (cap > 0) {
+          extractedText = item.extractedText.trim().slice(0, cap);
+          totalExtractedChars += extractedText.length;
+        }
+      }
+      attachments.push({
+        name,
+        mimeType: mimeType === 'image/jpg' ? 'image/jpeg' : mimeType,
+        kind,
+        summaryLabel: typeof item.summaryLabel === 'string' ? item.summaryLabel.trim().slice(0, 80) : undefined,
+        extractedText,
+        inlineImageBase64,
+        truncated: Boolean(item.truncated),
+      });
+    }
+  }
+
   const trimmedMessage = raw.message.trim();
-  if (!trimmedMessage) {
+  if (!trimmedMessage && attachments.length === 0) {
     return { ok: false, error: 'Message cannot be empty.' };
   }
   if (trimmedMessage.length > MAX_MESSAGE_CHARS) {
@@ -194,14 +256,22 @@ function validatePayload(body: unknown):
     };
   }
 
-  let responseLength: ResponseLength = 'concise';
+  let responseLength: ResponseLength = 'balanced';
   if (
-    raw.responseLength === 'concise' ||
+    raw.responseLength === 'quick' ||
     raw.responseLength === 'balanced' ||
-    raw.responseLength === 'detailed'
+    raw.responseLength === 'detailed' ||
+    raw.responseLength === 'concise'
   ) {
-    responseLength = raw.responseLength;
+    responseLength = raw.responseLength === 'concise' ? 'quick' : raw.responseLength;
   }
+
+  const preferredLanguage: PreferredLanguage =
+    raw.preferredLanguage === 'en' ||
+    raw.preferredLanguage === 'ur' ||
+    raw.preferredLanguage === 'roman-ur'
+      ? raw.preferredLanguage
+      : 'auto';
 
   const model =
     typeof raw.model === 'string' && (ELIGIBLE_MODELS as readonly string[]).includes(raw.model)
@@ -240,7 +310,15 @@ function validatePayload(body: unknown):
 
   return {
     ok: true,
-    data: { message: trimmedMessage, history, responseLength, model, clientContext },
+    data: {
+      message: trimmedMessage || 'Please analyze the attached file(s).',
+      history,
+      attachments: attachments.length > 0 ? attachments : undefined,
+      responseLength,
+      preferredLanguage,
+      model,
+      clientContext,
+    },
   };
 }
 
@@ -621,7 +699,8 @@ async function fetchLiveWebFallback(
 function buildSystemPrompt(
   responseLength: ResponseLength,
   loc: UserLocationContext,
-  webSnippet?: string
+  webSnippet?: string,
+  preferredLanguage: PreferredLanguage = 'auto'
 ): string {
   const lengthInstruction =
     responseLength === 'detailed'
@@ -629,6 +708,15 @@ function buildSystemPrompt(
       : responseLength === 'balanced'
         ? 'Response length preference: Balanced. Give a direct answer first, followed by concise bullet points or a short practical example where useful.'
         : 'Response length preference: Concise (Default). Keep answers short, direct, and easy to scan. Add extra detail only when the user asks or the subject requires it.';
+
+  const languageRule =
+    preferredLanguage === 'en'
+      ? 'PREFERRED LANGUAGE SETTING: Reply in clear, simple English (and write all 3 follow-up questions in English) unless the user explicitly asks to translate or use another language in their message.'
+      : preferredLanguage === 'ur'
+        ? 'PREFERRED LANGUAGE SETTING: Reply in proper, natural Urdu script (اردو) and write all 3 follow-up questions in Urdu script unless the user explicitly asks for another language in their message.'
+        : preferredLanguage === 'roman-ur'
+          ? 'PREFERRED LANGUAGE SETTING: Reply in clear, natural Roman Urdu and write all 3 follow-up questions in Roman Urdu unless the user explicitly asks for another language in their message.'
+          : "STRICT LANGUAGE MATCHING RULE: Match ONLY the language and script of the user's latest message for BOTH your main answer AND all 3 follow-up questions. Never switch languages inside the follow-up questions.";
 
   const geoParts = [loc.city, loc.region, loc.country].filter(Boolean);
   const locationLines = [
@@ -674,7 +762,7 @@ ${webBlock}
 Additional formatting and style rules:
 - Use simple vocabulary, short sentences, clean headings, bullet points, or numbered steps when helpful, and bold text for key points.
 - Write mathematical formulas in clean plain text or inline code rather than LaTeX \`$$\` syntax.
-- STRICT LANGUAGE MATCHING RULE: Match ONLY the language and script of the user's latest message for BOTH your main answer AND all 3 follow-up questions. Never switch languages inside the follow-up questions.
+- ${languageRule}
 - ${lengthInstruction}
 
 CRITICAL OUTPUT FORMAT FOR FOLLOW-UP SUGGESTIONS:
@@ -683,7 +771,50 @@ Do NOT list follow-up questions inside the main answer body. Instead, at the ver
 ["First follow-up question?", "Second follow-up question?", "Third follow-up question?"]`;
 }
 
-function normalizeContents(history: ChatHistoryTurn[], latestMessage: string): Content[] {
+function buildLatestUserParts(
+  latestMessage: string,
+  attachments?: ChatAttachmentInput[]
+): Part[] {
+  const parts: Part[] = [];
+  const blocks: string[] = [];
+  if (attachments) {
+    for (const att of attachments) {
+      const meta = [att.kind, att.summaryLabel].filter(Boolean).join(' · ');
+      if (att.extractedText) {
+        blocks.push(
+          `[Attached File: ${att.name} (${meta})]\n${att.extractedText}${
+            att.truncated ? '\n[Note: File text truncated to stay within free-tier context limits.]' : ''
+          }\n[End of ${att.name}]`
+        );
+      } else if (att.inlineImageBase64) {
+        blocks.push(`[Attached Image: ${att.name} (${meta || att.mimeType})]`);
+      }
+    }
+  }
+  const fullText =
+    blocks.length > 0 ? `${latestMessage}\n\n--- ATTACHED FILES DATA ---\n${blocks.join('\n\n')}` : latestMessage;
+  parts.push({ text: fullText });
+
+  if (attachments) {
+    for (const att of attachments) {
+      if (att.inlineImageBase64) {
+        parts.push({
+          inlineData: {
+            data: att.inlineImageBase64,
+            mimeType: att.mimeType || 'image/jpeg',
+          },
+        });
+      }
+    }
+  }
+  return parts;
+}
+
+function normalizeContents(
+  history: ChatHistoryTurn[],
+  latestMessage: string,
+  attachments?: ChatAttachmentInput[]
+): Content[] {
   const normalized: Content[] = [];
   for (const turn of history) {
     if (!turn.content.trim()) continue;
@@ -698,11 +829,15 @@ function normalizeContents(history: ChatHistoryTurn[], latestMessage: string): C
       normalized.push({ role: turn.role, parts: [{ text: turn.content }] });
     }
   }
+  const latestParts = buildLatestUserParts(latestMessage, attachments);
   const last = normalized[normalized.length - 1];
   if (last && last.role === 'user' && last.parts?.[0]?.text) {
-    last.parts[0].text = `${last.parts[0].text}\n\n${latestMessage}`;
+    last.parts[0].text = `${last.parts[0].text}\n\n${latestParts[0]?.text ?? latestMessage}`;
+    for (const extra of latestParts.slice(1)) {
+      last.parts.push(extra);
+    }
   } else {
-    normalized.push({ role: 'user', parts: [{ text: latestMessage }] });
+    normalized.push({ role: 'user', parts: latestParts });
   }
   return normalized;
 }
@@ -1065,8 +1200,53 @@ export default async function handler(
           'gemini-4-hydrogen',
         ])
       );
-      const allContents = normalizeContents(validation.data.history, validation.data.message);
+      const allContents = normalizeContents(
+        validation.data.history,
+        validation.data.message,
+        validation.data.attachments
+      );
       const priorHistory = allContents.slice(0, -1);
+      const latestParts = buildLatestUserParts(validation.data.message, validation.data.attachments);
+
+      const isImageReq =
+        /\b(generate|create|make|draw|paint|render|illustrate)\b.{0,40}\b(image|picture|photo|illustration|art|wallpaper|portrait|icon|logo|banner)\b|^(?:image of|picture of|wallpaper of|draw me|create an image|generate an image|make an image|make me an image)\b/i.test(
+          validation.data.message
+        );
+
+      if (isImageReq) {
+        try {
+          const imageRes = await generateImagesWithProvider({
+            prompt: validation.data.message,
+            style: 'none',
+            aspectRatio: '1:1',
+            count: 1,
+          });
+          if (imageRes.ok && imageRes.images.length > 0) {
+            const img = imageRes.images[0];
+            const answerText = `Here is the image generated based on your request:\n\n![${validation.data.message.slice(
+              0,
+              60
+            )}](${img.dataUrl})\n\n---\nHere are 3 follow-up questions to explore further:\n---FOLLOWUPS---\n["Can you create another variation?", "What style adjustments can we make?", "Tell me more about this subject?"]`;
+            writeSseEvent(res, { type: 'meta', model: 'flux-free' });
+            for (let i = 0; i < answerText.length; i += 24) {
+              writeSseEvent(res, { type: 'delta', text: answerText.slice(i, i + 24) });
+            }
+            writeSseEvent(res, {
+              type: 'followups',
+              questions: [
+                'Can you create another variation?',
+                'What style adjustments can we make?',
+                'Tell me more about this subject?',
+              ],
+            });
+            writeSseEvent(res, { type: 'done' });
+            if (!res.writableEnded) res.end();
+            return;
+          }
+        } catch {
+          // Fall back to text chat if image generation fails
+        }
+      }
 
       let cachedWeb: { webSnippet?: string; sources: GroundingSource[] } | null = null;
       const getWeb = async () => {
@@ -1081,7 +1261,8 @@ export default async function handler(
         const systemInstruction = buildSystemPrompt(
           validation.data.responseLength,
           locationContext,
-          web.webSnippet
+          web.webSnippet,
+          validation.data.preferredLanguage
         );
         const toolsConfig = enableSearch ? { tools: [{ googleSearch: {} }] } : {};
         const config = targetModel.startsWith('gemini-4-')
@@ -1092,9 +1273,14 @@ export default async function handler(
             }
           : { systemInstruction, ...toolsConfig };
 
-        if (priorHistory.length > 0) {
+        if (
+          priorHistory.length > 0 &&
+          !validation.data.attachments?.some((a) => Boolean(a.inlineImageBase64))
+        ) {
           const chat = ai.chats.create({ model: targetModel, history: priorHistory, config });
-          const stream = await chat.sendMessageStream({ message: validation.data.message });
+          const stream = await chat.sendMessageStream({
+            message: latestParts[0]?.text ?? validation.data.message,
+          });
           return { stream, model: targetModel, fallbackSources: web.sources };
         }
         const stream = await ai.models.generateContentStream({
@@ -1106,7 +1292,11 @@ export default async function handler(
       };
 
       const now = Date.now();
+      const hasAttachments = Boolean(
+        validation.data.attachments && validation.data.attachments.length > 0
+      );
       const useSearch =
+        !hasAttachments &&
         /\b(weather|temperature|forecast|rain|sunny|cloudy|humidity|wind|temp|mausam|latest|news|headline|current (time|price|rate|version|events?|news)|price of|exchange rate|who is|when did|search the web|release date|stock price|live score|capital of|today'?s)\b|موسم|درجہ حرارت/i.test(
           validation.data.message
         );

@@ -2,9 +2,13 @@ import {
   ArrowRight,
   ArrowUpRight,
   Check,
+  CheckSquare,
   Copy,
+  FileSpreadsheet,
+  FileText,
   Globe2,
   Pencil,
+  Presentation,
   RotateCcw,
   Trash2,
 } from 'lucide-react';
@@ -12,6 +16,7 @@ import { motion } from 'motion/react';
 import { useState, type KeyboardEvent } from 'react';
 import { detectTextDirection } from '../lib/language';
 import type { ChatMessage } from '../types/chat';
+import { ConsulLogo } from './ConsulLogo';
 import { MarkdownContent } from './MarkdownContent';
 import { ThinkingLoader } from './ThinkingLoader';
 
@@ -22,6 +27,7 @@ interface MessageBubbleProps {
   isSelectionMode?: boolean;
   isSelected?: boolean;
   onToggleSelect?: () => void;
+  onEnterSelectionMode?: () => void;
   onSelectFollowUp: (question: string) => void;
   onRegenerate: () => void;
   onEditUserMessage?: (newContent: string) => void;
@@ -43,6 +49,7 @@ export function MessageBubble({
   isSelectionMode = false,
   isSelected = false,
   onToggleSelect,
+  onEnterSelectionMode,
   onSelectFollowUp,
   onRegenerate,
   onEditUserMessage,
@@ -53,12 +60,7 @@ export function MessageBubble({
   const [draftEdit, setDraftEdit] = useState(message.content);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
-  const timeLabel = new Date(message.createdAt).toLocaleTimeString([], {
-    hour: '2-digit',
-    minute: '2-digit',
-  });
-
-  const handleCopyResponse = async () => {
+  const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(message.content);
       setCopied(true);
@@ -92,11 +94,12 @@ export function MessageBubble({
 
   if (message.role === 'user') {
     const dir = detectTextDirection(isEditing ? draftEdit : message.content);
+    const attachments = message.attachments ?? [];
     return (
       <motion.div
-        initial={{ opacity: 0, y: 8, scale: 0.985 }}
-        animate={{ opacity: 1, y: 0, scale: 1 }}
-        transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+        initial={{ opacity: 0, y: 6 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
         className="group flex flex-col items-end gap-1.5"
       >
         <div className="flex w-full items-start justify-end gap-2.5">
@@ -107,13 +110,13 @@ export function MessageBubble({
                 checked={isSelected}
                 onChange={onToggleSelect}
                 aria-label="Select user message"
-                className="h-4 w-4 rounded border-zinc-300 text-blue-600 focus:ring-blue-600"
+                className="h-4 w-4 rounded border-zinc-400 text-[#3D6B58] focus:ring-[#3D6B58]"
               />
             </label>
           )}
 
           {isEditing ? (
-            <div className="w-full max-w-[88%] rounded-2xl border border-blue-600 bg-white p-3 shadow-sm sm:max-w-[78%] dark:border-blue-400 dark:bg-[#14141E]">
+            <div className="w-full max-w-[90%] rounded-2xl border border-[#3D6B58]/50 bg-white p-3.5 shadow-xs sm:max-w-[78%] dark:border-[#6BA588]/50 dark:bg-[#1D1F23]">
               <textarea
                 value={draftEdit}
                 onChange={(e) => setDraftEdit(e.target.value)}
@@ -122,16 +125,16 @@ export function MessageBubble({
                 rows={3}
                 autoFocus
                 aria-label="Edit message"
-                className="w-full resize-y bg-transparent text-[15px] leading-relaxed text-zinc-950 focus:outline-none dark:text-zinc-100"
+                className="w-full resize-y bg-transparent text-[15px] leading-relaxed text-[#18191B] focus:outline-none dark:text-[#ECECEF]"
               />
-              <div className="mt-2 flex items-center justify-end gap-2">
+              <div className="mt-2.5 flex items-center justify-end gap-2">
                 <button
                   type="button"
                   onClick={() => {
                     setIsEditing(false);
                     setDraftEdit(message.content);
                   }}
-                  className="min-h-[32px] rounded-lg border border-zinc-200 px-3 text-xs font-medium text-zinc-700 hover:bg-zinc-50 dark:border-white/15 dark:text-zinc-300 dark:hover:bg-white/10"
+                  className="min-h-[34px] rounded-xl border border-black/[0.1] px-3 text-xs font-medium text-[#464A50] hover:bg-black/[0.04] dark:border-white/[0.1] dark:text-[#C4C8CE] dark:hover:bg-white/[0.06]"
                 >
                   Cancel
                 </button>
@@ -139,25 +142,95 @@ export function MessageBubble({
                   type="button"
                   onClick={commitEdit}
                   disabled={!draftEdit.trim()}
-                  className="min-h-[32px] rounded-lg bg-blue-600 px-3 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
+                  className="min-h-[34px] rounded-xl bg-[#3D6B58] px-3.5 text-xs font-medium text-white hover:bg-[#315848] disabled:opacity-50 dark:bg-[#6BA588] dark:text-[#111315] dark:hover:bg-[#7BB59C]"
                 >
                   Save &amp; resend
                 </button>
               </div>
             </div>
           ) : (
-            <div
-              dir={dir}
-              data-testid="user-message"
-              className="max-w-[88%] rounded-2xl border border-blue-700/35 bg-blue-600 px-4 py-3 text-[15px] leading-relaxed text-white shadow-[0_3px_0_0_rgba(29,78,216,0.22)] sm:max-w-[78%] dark:border-blue-400/35 dark:bg-blue-600 dark:text-white dark:shadow-none"
-            >
-              <p className="whitespace-pre-wrap break-words">{message.content}</p>
+            <div className="flex max-w-[86%] flex-col items-end gap-2 sm:max-w-[75%]">
+              {attachments.length > 0 && (
+                <div className="flex flex-wrap justify-end gap-2">
+                  {attachments.map((att) => {
+                    const Icon =
+                      att.kind === 'spreadsheet'
+                        ? FileSpreadsheet
+                        : att.kind === 'presentation'
+                          ? Presentation
+                          : FileText;
+                    if (att.kind === 'image' && att.previewDataUrl) {
+                      return (
+                        <div
+                          key={att.id}
+                          className="overflow-hidden rounded-2xl border border-black/[0.08] bg-white shadow-xs dark:border-white/[0.09] dark:bg-[#1D1F23]"
+                        >
+                          <img
+                            src={att.previewDataUrl}
+                            alt={att.name}
+                            className="max-h-44 max-w-[220px] object-cover"
+                          />
+                        </div>
+                      );
+                    }
+                    return (
+                      <div
+                        key={att.id}
+                        className="flex items-center gap-2 rounded-2xl border border-black/[0.08] bg-white px-3 py-2 text-xs dark:border-white/[0.09] dark:bg-[#1D1F23]"
+                      >
+                        <Icon
+                          className="h-4 w-4 shrink-0 text-[#3D6B58] dark:text-[#7CC0A3]"
+                          aria-hidden="true"
+                        />
+                        <div className="min-w-0">
+                          <p className="max-w-[180px] truncate font-medium text-[#18191B] dark:text-[#ECECEF]">
+                            {att.name}
+                          </p>
+                          {att.summaryLabel && (
+                            <p className="text-[10px] text-[#6E737B] dark:text-[#8E939C]">
+                              {att.summaryLabel}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              <div
+                dir={dir}
+                data-testid="user-message"
+                className="rounded-3xl bg-[#EFECE5] px-4.5 py-3 text-[15px] leading-[1.62] text-[#18191B] dark:bg-[#25272B] dark:text-[#ECECEF]"
+              >
+                <p className="whitespace-pre-wrap break-words">{message.content}</p>
+              </div>
             </div>
           )}
         </div>
 
-        {!isEditing && !isGenerating && (onEditUserMessage || onDeleteMessage) && (
-          <div className="flex items-center gap-1 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100">
+        {!isEditing && !isGenerating && (
+          <div className="flex items-center gap-0.5 opacity-80 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100">
+            <button
+              type="button"
+              onClick={handleCopy}
+              aria-label="Copy prompt"
+              title="Copy"
+              className="inline-flex h-8 items-center gap-1 rounded-lg px-2 text-[11px] font-medium text-[#6B7078] transition-colors hover:bg-black/[0.05] hover:text-[#18191B] dark:text-[#8E939C] dark:hover:bg-white/[0.07] dark:hover:text-white"
+            >
+              {copied ? (
+                <>
+                  <Check className="h-3 w-3 text-[#3D6B58] dark:text-[#7CC0A3]" aria-hidden="true" />
+                  <span>Copied</span>
+                </>
+              ) : (
+                <>
+                  <Copy className="h-3 w-3" aria-hidden="true" />
+                  <span>Copy</span>
+                </>
+              )}
+            </button>
+
             {onEditUserMessage && (
               <button
                 type="button"
@@ -167,40 +240,44 @@ export function MessageBubble({
                   setIsEditing(true);
                 }}
                 aria-label="Edit message"
-                className="inline-flex h-7 items-center gap-1 rounded-lg px-2 text-[11px] font-medium text-zinc-500 transition-colors hover:bg-zinc-200/70 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/10 dark:hover:text-white"
+                title="Edit"
+                className="inline-flex h-8 items-center gap-1 rounded-lg px-2 text-[11px] font-medium text-[#6B7078] transition-colors hover:bg-black/[0.05] hover:text-[#18191B] dark:text-[#8E939C] dark:hover:bg-white/[0.07] dark:hover:text-white"
               >
                 <Pencil className="h-3 w-3" aria-hidden="true" />
                 <span>Edit</span>
               </button>
             )}
+
             {onDeleteMessage && !confirmDelete && (
               <button
                 type="button"
                 onClick={() => setConfirmDelete(true)}
                 aria-label="Delete message"
-                className="inline-flex h-7 items-center gap-1 rounded-lg px-2 text-[11px] font-medium text-zinc-500 transition-colors hover:bg-rose-50 hover:text-rose-600 dark:text-zinc-400 dark:hover:bg-rose-950/50 dark:hover:text-rose-400"
+                title="Delete"
+                className="inline-flex h-8 items-center gap-1 rounded-lg px-2 text-[11px] font-medium text-[#6B7078] transition-colors hover:bg-rose-500/10 hover:text-rose-600 dark:text-[#8E939C] dark:hover:bg-rose-500/15 dark:hover:text-rose-400"
               >
                 <Trash2 className="h-3 w-3" aria-hidden="true" />
                 <span>Delete</span>
               </button>
             )}
+
             {onDeleteMessage && confirmDelete && (
-              <div className="flex items-center gap-1 rounded-lg border border-rose-200 bg-rose-50 px-1.5 py-0.5 dark:border-rose-900/60 dark:bg-rose-950/40">
+              <div className="flex items-center gap-1.5 rounded-lg border border-rose-500/25 bg-rose-500/8 px-2 py-1">
                 <button
                   type="button"
                   onClick={() => {
                     setConfirmDelete(false);
                     onDeleteMessage();
                   }}
-                  className="text-[11px] font-semibold text-rose-700 hover:underline dark:text-rose-300"
+                  className="text-[11px] font-medium text-rose-600 hover:underline dark:text-rose-400"
                 >
-                  Confirm delete
+                  Confirm
                 </button>
-                <span className="text-zinc-300 dark:text-zinc-600">·</span>
+                <span className="text-[#9CA1A8]">·</span>
                 <button
                   type="button"
                   onClick={() => setConfirmDelete(false)}
-                  className="text-[11px] text-zinc-600 hover:underline dark:text-zinc-300"
+                  className="text-[11px] text-[#5C6066] hover:underline dark:text-[#9CA1A8]"
                 >
                   Cancel
                 </button>
@@ -222,176 +299,199 @@ export function MessageBubble({
 
   return (
     <motion.article
-      initial={{ opacity: 0, y: 8 }}
+      initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+      transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
       data-testid="assistant-message"
-      className="rounded-2xl border border-zinc-900/12 bg-white px-4 py-4 shadow-[0_2px_0_0_rgba(24,24,27,0.06)] sm:px-5 sm:py-4.5 dark:border-white/10 dark:bg-[#111118] dark:shadow-none"
+      className="group"
     >
-      <div className="mb-3 flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2.5">
+      <div className="flex flex-col gap-2.5 sm:flex-row sm:items-start sm:gap-4">
+        {/* Minimal Avatar Row on mobile, Left Column on tablet/desktop */}
+        <div className="flex shrink-0 items-center gap-2 sm:pt-0.5">
           {isSelectionMode && (
             <input
               type="checkbox"
               checked={isSelected}
               onChange={onToggleSelect}
               aria-label="Select assistant response"
-              className="h-4 w-4 cursor-pointer rounded border-zinc-300 text-blue-600 focus:ring-blue-600"
+              className="h-4 w-4 cursor-pointer rounded border-zinc-400 text-[#3D6B58] focus:ring-[#3D6B58]"
             />
           )}
-          <span className="font-display inline-flex h-7 w-7 items-center justify-center rounded-lg border border-zinc-900/15 bg-[#D9F99D] text-xs font-extrabold text-zinc-950 dark:border-emerald-400/30 dark:bg-emerald-400/15 dark:text-emerald-300">
-            C
-          </span>
-          <span className="font-display text-xs font-bold tracking-tight text-zinc-950 dark:text-zinc-100">
+          <div className="flex h-7 w-7 items-center justify-center rounded-lg border border-black/[0.08] bg-white text-[#3D6B58] dark:border-white/[0.1] dark:bg-[#1D1F23] dark:text-[#7CC0A3]">
+            <ConsulLogo className="h-4 w-4" />
+          </div>
+          <span className="font-display text-xs font-semibold tracking-tight text-[#18191B] sm:hidden dark:text-[#ECECEF]">
             Consul AI
           </span>
         </div>
-        <span className="font-mono-code text-[11px] text-zinc-400 tabular-nums dark:text-zinc-500">
-          {timeLabel}
-        </span>
-      </div>
 
-      {isWaitingFirstToken ? <ThinkingLoader /> : <MarkdownContent content={message.content} />}
-
-      {message.stopped && (
-        <p className="mt-2.5 text-xs text-zinc-500 dark:text-zinc-400">
-          Response generation stopped.
-        </p>
-      )}
-
-      {sources.length > 0 && !(isGenerating && isLatestAssistant) && (
-        <div
-          data-testid="grounding-sources"
-          className="mt-4 rounded-xl border border-sky-200/80 bg-sky-50/70 p-3 dark:border-sky-500/20 dark:bg-sky-950/25"
-        >
-          <div className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-sky-900 dark:text-sky-300">
-            <Globe2 className="h-3.5 w-3.5 text-sky-600 dark:text-sky-400" aria-hidden="true" />
-            <span>Web sources</span>
-          </div>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-            {sources.map((src) => (
-              <a
-                key={src.uri}
-                href={src.uri}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="group flex items-center justify-between gap-2 rounded-xl border border-sky-200/90 bg-white px-3 py-2 text-xs transition-colors hover:border-sky-500 hover:bg-sky-50 focus-visible:outline-2 focus-visible:outline-sky-600 dark:border-sky-500/25 dark:bg-[#0F1726] dark:hover:border-sky-400/60 dark:hover:bg-sky-950/45"
-              >
-                <div className="min-w-0">
-                  <p className="truncate font-medium text-zinc-900 dark:text-zinc-100">
-                    {src.title}
-                  </p>
-                  <p className="font-mono-code truncate text-[11px] text-sky-700/80 dark:text-sky-300/75">
-                    {getHostname(src.uri)}
-                  </p>
-                </div>
-                <ArrowUpRight
-                  className="h-3.5 w-3.5 shrink-0 text-sky-500 transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-sky-700 dark:group-hover:text-sky-300"
-                  aria-hidden="true"
-                />
-              </a>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {message.content && !(isGenerating && isLatestAssistant) && (
-        <div className="mt-3.5 flex flex-wrap items-center gap-2 border-t border-zinc-200/80 pt-3 dark:border-white/10">
-          <button
-            type="button"
-            onClick={handleCopyResponse}
-            className="inline-flex min-h-[34px] items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-100 hover:text-zinc-950 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 dark:text-zinc-300 dark:hover:bg-white/10 dark:hover:text-white whitespace-nowrap shrink-0"
-          >
-            {copied ? (
-              <>
-                <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
-                <span>Copied</span>
-              </>
-            ) : (
-              <>
-                <Copy className="h-3.5 w-3.5" aria-hidden="true" />
-                <span>Copy</span>
-              </>
-            )}
-          </button>
-
-          {isLatestAssistant && (
-            <button
-              type="button"
-              onClick={onRegenerate}
-              disabled={isGenerating}
-              className="inline-flex min-h-[34px] items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-100 hover:text-zinc-950 disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 dark:text-zinc-300 dark:hover:bg-white/10 dark:hover:text-white whitespace-nowrap shrink-0"
-            >
-              <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>Regenerate</span>
-            </button>
+        {/* Prose directly on canvas (no enclosing card) */}
+        <div className="min-w-0 flex-1">
+          {isWaitingFirstToken ? (
+            <ThinkingLoader />
+          ) : (
+            <MarkdownContent content={message.content} />
           )}
 
-          {onDeleteMessage && !isGenerating && (
-            !confirmDelete ? (
-              <button
-                type="button"
-                onClick={() => setConfirmDelete(true)}
-                aria-label="Delete response"
-                className="inline-flex min-h-[34px] items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-zinc-500 transition-colors hover:bg-rose-50 hover:text-rose-600 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 dark:text-zinc-400 dark:hover:bg-rose-950/50 dark:hover:text-rose-400 whitespace-nowrap shrink-0"
-              >
-                <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
-                <span>Delete</span>
-              </button>
-            ) : (
-              <div className="flex items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1 dark:border-rose-900/60 dark:bg-rose-950/40">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setConfirmDelete(false);
-                    onDeleteMessage();
-                  }}
-                  className="text-xs font-semibold text-rose-700 hover:underline dark:text-rose-300"
-                >
-                  Confirm delete
-                </button>
-                <span className="text-zinc-300 dark:text-zinc-600">·</span>
-                <button
-                  type="button"
-                  onClick={() => setConfirmDelete(false)}
-                  className="text-xs text-zinc-600 hover:underline dark:text-zinc-300"
-                >
-                  Cancel
-                </button>
+          {message.stopped && (
+            <p className="mt-2.5 text-xs text-[#6E737B] dark:text-[#8E939C]">
+              Response generation stopped.
+            </p>
+          )}
+
+          {/* Clean Grounding Sources Strip */}
+          {sources.length > 0 && !(isGenerating && isLatestAssistant) && (
+            <div data-testid="grounding-sources" className="mt-4">
+              <div className="mb-2 flex items-center gap-1.5 text-xs font-medium text-[#5C6066] dark:text-[#9CA1A8]">
+                <Globe2 className="h-3.5 w-3.5 text-[#3D6B58] dark:text-[#7CC0A3]" aria-hidden="true" />
+                <span>Sources</span>
               </div>
-            )
+              <div className="flex flex-wrap gap-2">
+                {sources.map((src) => (
+                  <a
+                    key={src.uri}
+                    href={src.uri}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="group/src inline-flex max-w-full items-center gap-2 rounded-xl border border-black/[0.08] bg-white/75 px-3 py-1.5 text-xs transition-colors hover:border-[#3D6B58]/40 hover:bg-white focus-visible:outline-2 focus-visible:outline-[#3D6B58] dark:border-white/[0.08] dark:bg-white/[0.03] dark:hover:border-[#6BA588]/40 dark:hover:bg-white/[0.06]"
+                  >
+                    <span className="truncate font-medium text-[#18191B] max-w-[190px] sm:max-w-[230px] dark:text-[#ECECEF]">
+                      {src.title}
+                    </span>
+                    <span className="font-mono-code shrink-0 text-[11px] text-[#6E737B] dark:text-[#8E939C]">
+                      {getHostname(src.uri)}
+                    </span>
+                    <ArrowUpRight
+                      className="h-3.5 w-3.5 shrink-0 text-[#757A82] transition-transform group-hover/src:translate-x-0.5 group-hover/src:-translate-y-0.5 group-hover/src:text-[#3D6B58] dark:group-hover/src:text-[#7CC0A3]"
+                      aria-hidden="true"
+                    />
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Unobtrusive Action Toolbar */}
+          {message.content && !(isGenerating && isLatestAssistant) && (
+            <div
+              className={`mt-3 flex flex-wrap items-center gap-1 transition-opacity ${
+                isLatestAssistant
+                  ? 'opacity-95'
+                  : 'opacity-85 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100'
+              }`}
+            >
+              <button
+                type="button"
+                onClick={handleCopy}
+                aria-label="Copy response"
+                title="Copy"
+                className="inline-flex min-h-[34px] items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-medium text-[#5C6066] transition-colors hover:bg-black/[0.05] hover:text-[#18191B] focus-visible:outline-2 focus-visible:outline-[#3D6B58] dark:text-[#9CA1A8] dark:hover:bg-white/[0.07] dark:hover:text-white whitespace-nowrap shrink-0"
+              >
+                {copied ? (
+                  <>
+                    <Check className="h-3.5 w-3.5 text-[#3D6B58] dark:text-[#7CC0A3]" aria-hidden="true" />
+                    <span>Copied</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Copy</span>
+                  </>
+                )}
+              </button>
+
+              {isLatestAssistant && (
+                <button
+                  type="button"
+                  onClick={onRegenerate}
+                  disabled={isGenerating}
+                  aria-label="Regenerate response"
+                  title="Regenerate"
+                  className="inline-flex min-h-[34px] items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-medium text-[#5C6066] transition-colors hover:bg-black/[0.05] hover:text-[#18191B] disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-[#3D6B58] dark:text-[#9CA1A8] dark:hover:bg-white/[0.07] dark:hover:text-white whitespace-nowrap shrink-0"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Regenerate</span>
+                </button>
+              )}
+
+              {onEnterSelectionMode && !isSelectionMode && (
+                <button
+                  type="button"
+                  onClick={onEnterSelectionMode}
+                  aria-label="Select messages"
+                  title="Select"
+                  className="inline-flex min-h-[34px] items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-medium text-[#5C6066] transition-colors hover:bg-black/[0.05] hover:text-[#18191B] focus-visible:outline-2 focus-visible:outline-[#3D6B58] dark:text-[#9CA1A8] dark:hover:bg-white/[0.07] dark:hover:text-white whitespace-nowrap shrink-0"
+                >
+                  <CheckSquare className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Select</span>
+                </button>
+              )}
+
+              {onDeleteMessage && !isGenerating && (
+                !confirmDelete ? (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmDelete(true)}
+                    aria-label="Delete response"
+                    title="Delete"
+                    className="inline-flex min-h-[34px] items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-medium text-[#5C6066] transition-colors hover:bg-rose-500/10 hover:text-rose-600 focus-visible:outline-2 focus-visible:outline-[#3D6B58] dark:text-[#9CA1A8] dark:hover:bg-rose-500/15 dark:hover:text-rose-400 whitespace-nowrap shrink-0"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Delete</span>
+                  </button>
+                ) : (
+                  <div className="flex items-center gap-1.5 rounded-lg border border-rose-500/25 bg-rose-500/8 px-2.5 py-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setConfirmDelete(false);
+                        onDeleteMessage();
+                      }}
+                      className="text-xs font-medium text-rose-600 hover:underline dark:text-rose-400"
+                    >
+                      Confirm delete
+                    </button>
+                    <span className="text-[#9CA1A8]">·</span>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDelete(false)}
+                      className="text-xs text-[#5C6066] hover:underline dark:text-[#9CA1A8]"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                )
+              )}
+            </div>
+          )}
+
+          {/* Clean Follow-Up Suggestions */}
+          {isLatestAssistant && followUps.length > 0 && !isGenerating && (
+            <div dir={followUpDir} data-testid="followup-suggestions" className="mt-5">
+              <p className="font-ui mb-2 text-xs font-medium text-[#6E737B] dark:text-[#8E939C]">
+                Follow-up questions
+              </p>
+              <div className="flex flex-col gap-1.5">
+                {followUps.map((question) => (
+                  <button
+                    key={question}
+                    type="button"
+                    onClick={() => onSelectFollowUp(question)}
+                    dir={detectTextDirection(question)}
+                    className="group/fu flex min-h-[42px] w-full items-center justify-between gap-3 rounded-xl border border-black/[0.08] bg-white/65 px-3.5 py-2 text-start text-[13.5px] font-medium text-[#2A2D32] transition-colors hover:border-[#3D6B58]/40 hover:bg-white hover:text-[#18191B] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#3D6B58] dark:border-white/[0.08] dark:bg-white/[0.025] dark:text-[#D5D8DD] dark:hover:border-[#6BA588]/40 dark:hover:bg-white/[0.06] dark:hover:text-white"
+                  >
+                    <span className="leading-snug">{question}</span>
+                    <ArrowRight
+                      className="h-4 w-4 shrink-0 text-[#757A82] transition-transform group-hover/fu:translate-x-0.5 group-hover/fu:text-[#3D6B58] rtl:rotate-180 rtl:group-hover/fu:-translate-x-0.5 dark:text-[#8E939C] dark:group-hover/fu:text-[#7CC0A3]"
+                      aria-hidden="true"
+                    />
+                  </button>
+                ))}
+              </div>
+            </div>
           )}
         </div>
-      )}
-
-      {isLatestAssistant && followUps.length > 0 && !isGenerating && (
-        <div
-          dir={followUpDir}
-          data-testid="followup-suggestions"
-          className="mt-3.5 rounded-xl border border-violet-200/80 bg-violet-50/60 p-3 dark:border-violet-500/20 dark:bg-violet-950/25"
-        >
-          <p className="mb-2 text-xs font-semibold text-violet-900 dark:text-violet-300">
-            Keep exploring
-          </p>
-          <div className="flex flex-col gap-2">
-            {followUps.map((question) => (
-              <button
-                key={question}
-                type="button"
-                onClick={() => onSelectFollowUp(question)}
-                dir={detectTextDirection(question)}
-                className="group flex min-h-[42px] w-full items-center justify-between gap-3 rounded-xl border border-violet-200/90 bg-white px-3.5 py-2 text-start text-sm font-medium text-zinc-800 transition-all hover:-translate-y-0.5 hover:border-violet-500 hover:bg-violet-50 hover:text-zinc-950 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-600 dark:border-violet-500/25 dark:bg-[#171527] dark:text-zinc-200 dark:hover:border-violet-400/60 dark:hover:bg-violet-950/45 dark:hover:text-white"
-              >
-                <span className="leading-snug">{question}</span>
-                <ArrowRight
-                  className="h-4 w-4 shrink-0 text-violet-400 transition-transform group-hover:translate-x-0.5 group-hover:text-violet-700 rtl:rotate-180 rtl:group-hover:-translate-x-0.5 dark:group-hover:text-violet-300"
-                  aria-hidden="true"
-                />
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
+      </div>
     </motion.article>
   );
 }

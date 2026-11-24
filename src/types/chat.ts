@@ -1,6 +1,8 @@
 export type ThemeMode = 'light' | 'dark';
 
-export type ResponseLength = 'concise' | 'balanced' | 'detailed';
+export type ResponseLength = 'quick' | 'balanced' | 'detailed' | 'concise';
+
+export type PreferredLanguage = 'auto' | 'en' | 'ur' | 'roman-ur';
 
 export type EligibleModel =
   | 'gemini-3.8-flash'
@@ -8,9 +10,29 @@ export type EligibleModel =
   | 'gemini-4-hydrogen'
   | (string & {});
 
+export type LiveVoiceName = 'Zephyr' | 'Kore';
+
 export type MessageRole = 'user' | 'assistant';
 
 export type TextDirection = 'ltr' | 'rtl';
+
+export type AttachmentKind = 'document' | 'spreadsheet' | 'presentation' | 'image' | 'text';
+
+export interface MessageAttachment {
+  id: string;
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+  kind: AttachmentKind;
+  summaryLabel?: string;
+  extractedText?: string;
+  previewDataUrl?: string;
+  inlineImageBase64?: string;
+  pageCount?: number;
+  sheetNames?: string[];
+  slideCount?: number;
+  truncated?: boolean;
+}
 
 export interface GroundingSource {
   title: string;
@@ -40,6 +62,7 @@ export interface ChatMessage {
   role: MessageRole;
   content: string;
   createdAt: number;
+  attachments?: MessageAttachment[];
   followUpQuestions?: string[];
   sources?: GroundingSource[];
   isError?: boolean;
@@ -60,6 +83,9 @@ export interface UserSettings {
   theme: ThemeMode;
   responseLength: ResponseLength;
   model: EligibleModel;
+  preferredLanguage: PreferredLanguage;
+  liveVoiceName?: LiveVoiceName;
+  maxUploadMb?: number;
 }
 
 export interface ChatHistoryTurn {
@@ -70,7 +96,9 @@ export interface ChatHistoryTurn {
 export interface ChatRequestPayload {
   message: string;
   history: ChatHistoryTurn[];
+  attachments?: MessageAttachment[];
   responseLength: ResponseLength;
+  preferredLanguage?: PreferredLanguage;
   model?: EligibleModel;
   clientContext?: ClientContext;
 }
@@ -80,4 +108,52 @@ export interface ExportPayload {
   version: number;
   exportedAt: string;
   conversations: Conversation[];
+}
+
+export type ImageStylePreset =
+  | 'none'
+  | 'product-photography'
+  | 'lifestyle-photography'
+  | 'commercial-advertising'
+  | 'illustration'
+  | 'anime'
+  | 'photorealism'
+  | 'digital-artwork'
+  | '3d-artwork';
+
+export type ImageAspectRatio = '1:1' | '4:3' | '16:9' | '3:4' | '9:16';
+
+export interface GeneratedImageRecord {
+  id: string;
+  prompt: string;
+  style: ImageStylePreset;
+  aspectRatio: ImageAspectRatio;
+  dataUrl: string;
+  mimeType: string;
+  provider: string;
+  model: string;
+  createdAt: number;
+  batchId: string;
+  variantIndex: number;
+}
+
+export interface ApiStatusSnapshot {
+  ok: boolean;
+  configured: boolean;
+  defaultModel: string;
+  eligibleModels: string[];
+  liveModel: string;
+  liveAvailable: boolean;
+  liveTransport: 'ws-bridge+ephemeral' | 'ephemeral-only' | 'unavailable';
+  liveUnavailableReason?: string;
+  imageModel?: string;
+  imageProvider: 'none' | 'gemini' | 'huggingface' | 'pollinations';
+  imageAvailable: boolean;
+  imageUnavailableReason?: string;
+  freeOnlyPolicy: boolean;
+  rateLimit: {
+    windowSec: number;
+    maxRequests: number;
+  };
+  nodeVersion?: string;
 }

@@ -1,10 +1,11 @@
-import type { ChatMessage, Conversation } from '../types/chat';
+import type { ChatMessage, Conversation, GeneratedImageRecord } from '../types/chat';
 import { computeLastMessagePreview, loadConversations, sanitizeConversations } from './storage';
 
 const DB_NAME = 'consul_ai_db';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const CONVERSATIONS_STORE = 'conversations';
 const MESSAGES_STORE = 'messages';
+const IMAGES_STORE = 'generated_images';
 const MIGRATION_FLAG_KEY = 'consul_ai_idb_migrated_v1';
 
 interface StoredConversationRow {
@@ -17,6 +18,15 @@ interface StoredConversationRow {
 
 interface StoredMessageRow extends ChatMessage {
   conversationId: string;
+}
+
+export interface StorageUsageSummary {
+  usingIndexedDb: boolean;
+  conversationCount: number;
+  messageCount: number;
+  generatedImageCount: number;
+  usageBytes?: number;
+  quotaBytes?: number;
 }
 
 export function isIndexedDbAvailable(): boolean {
@@ -48,6 +58,10 @@ function openDatabase(): Promise<IDBDatabase> {
         msgStore.createIndex('conversationCreated', ['conversationId', 'createdAt'], {
           unique: false,
         });
+      }
+      if (!db.objectStoreNames.contains(IMAGES_STORE)) {
+        const imgStore = db.createObjectStore(IMAGES_STORE, { keyPath: 'id' });
+        imgStore.createIndex('createdAt', 'createdAt', { unique: false });
       }
     };
 
@@ -83,12 +97,15 @@ function toConversationRow(conv: Conversation): StoredConversationRow {
 }
 
 function toMessageRow(conversationId: string, msg: ChatMessage): StoredMessageRow {
+  // Store lightweight attachment previews & extracted text, strip transient large inlineImageBase64
+  const attachments = msg.attachments?.map(({ inlineImageBase64: _b64, ...rest }) => rest);
   return {
     id: msg.id,
     conversationId,
     role: msg.role,
     content: msg.content,
     createdAt: msg.createdAt,
+    attachments: attachments && attachments.length > 0 ? attachments : undefined,
     followUpQuestions: msg.followUpQuestions,
     sources: msg.sources,
     isError: msg.isError,
@@ -103,6 +120,7 @@ function stripMessageRow(row: StoredMessageRow): ChatMessage {
     role: row.role,
     content: row.content,
     createdAt: row.createdAt,
+    attachments: row.attachments,
     followUpQuestions: row.followUpQuestions,
     sources: row.sources,
     isError: row.isError,
@@ -123,14 +141,12 @@ export async function initAndLoadConversations(): Promise<{
   try {
     db = await openDatabase();
 
-    // Check existing records in IndexedDB
     const readTx = db.transaction([CONVERSATIONS_STORE, MESSAGES_STORE], 'readonly');
     const [convRows, msgRows] = await Promise.all([
       reqPromise<StoredConversationRow[]>(readTx.objectStore(CONVERSATIONS_STORE).getAll()),
       reqPromise<StoredMessageRow[]>(readTx.objectStore(MESSAGES_STORE).getAll()),
     ]);
 
-    // One-time migration from legacy localStorage if IndexedDB is empty
     const alreadyMigrated =
       typeof window !== 'undefined' && window.localStorage.getItem(MIGRATION_FLAG_KEY) === '1';
 
@@ -203,7 +219,6 @@ export async function syncConversationTx(conv: Conversation): Promise<boolean> {
 
     cStore.put(toConversationRow(conv));
 
-    // Delete any messages in this conversation that are no longer in conv.messages
     const keepIds = new Set(conv.messages.map((m) => m.id));
     const idx = mStore.index('conversationId');
     const cursorReq = idx.openCursor(IDBKeyRange.only(conv.id));
@@ -308,6 +323,129 @@ export async function clearAllDbTx(): Promise<boolean> {
     return true;
   } catch {
     return false;
+  } finally {
+    db?.close();
+  }
+}
+
+export async function saveGeneratedImagesTx(records: GeneratedImageRecord[]): Promise<boolean> {
+  if (!isIndexedDbAvailable() || records.length === 0) return false;
+  let db: IDBDatabase | null = null;
+  try {
+    db = await openDatabase();
+    const tx = db.transaction([IMAGES_STORE], 'readwrite');
+    const store = tx.objectStore(IMAGES_STORE);
+    for (const rec of records) {
+      store.put(rec);
+    }
+    await txDone(tx);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    db?.close();
+  }
+}
+
+export async function listGeneratedImagesTx(): Promise<GeneratedImageRecord[]> {
+  if (!isIndexedDbAvailable()) return [];
+  let db: IDBDatabase | null = null;
+  try {
+    db = await openDatabase();
+    const tx = db.transaction([IMAGES_STORE], 'readonly');
+    const rows = await reqPromise<GeneratedImageRecord[]>(tx.objectStore(IMAGES_STORE).getAll());
+    return rows.sort((a, b) => b.createdAt - a.createdAt);
+  } catch {
+    return [];
+  } finally {
+    db?.close();
+  }
+}
+
+export async function deleteGeneratedImageTx(id: string): Promise<boolean> {
+  if (!isIndexedDbAvailable()) return false;
+  let db: IDBDatabase | null = null;
+  try {
+    db = await openDatabase();
+    const tx = db.transaction([IMAGES_STORE], 'readwrite');
+    tx.objectStore(IMAGES_STORE).delete(id);
+    await txDone(tx);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    db?.close();
+  }
+}
+
+export async function clearGeneratedImagesTx(): Promise<boolean> {
+  if (!isIndexedDbAvailable()) return false;
+  let db: IDBDatabase | null = null;
+  try {
+    db = await openDatabase();
+    const tx = db.transaction([IMAGES_STORE], 'readwrite');
+    tx.objectStore(IMAGES_STORE).clear();
+    await txDone(tx);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    db?.close();
+  }
+}
+
+export async function getStorageUsageSummary(): Promise<StorageUsageSummary> {
+  let usageBytes: number | undefined;
+  let quotaBytes: number | undefined;
+  if (typeof navigator !== 'undefined' && navigator.storage?.estimate) {
+    try {
+      const est = await navigator.storage.estimate();
+      usageBytes = est.usage;
+      quotaBytes = est.quota;
+    } catch {
+      // ignore storage estimate errors
+    }
+  }
+
+  if (!isIndexedDbAvailable()) {
+    const convs = loadConversations();
+    const msgCount = convs.reduce((acc, c) => acc + c.messages.length, 0);
+    return {
+      usingIndexedDb: false,
+      conversationCount: convs.length,
+      messageCount: msgCount,
+      generatedImageCount: 0,
+      usageBytes,
+      quotaBytes,
+    };
+  }
+
+  let db: IDBDatabase | null = null;
+  try {
+    db = await openDatabase();
+    const tx = db.transaction([CONVERSATIONS_STORE, MESSAGES_STORE, IMAGES_STORE], 'readonly');
+    const [conversationCount, messageCount, generatedImageCount] = await Promise.all([
+      reqPromise<number>(tx.objectStore(CONVERSATIONS_STORE).count()),
+      reqPromise<number>(tx.objectStore(MESSAGES_STORE).count()),
+      reqPromise<number>(tx.objectStore(IMAGES_STORE).count()),
+    ]);
+    return {
+      usingIndexedDb: true,
+      conversationCount,
+      messageCount,
+      generatedImageCount,
+      usageBytes,
+      quotaBytes,
+    };
+  } catch {
+    return {
+      usingIndexedDb: false,
+      conversationCount: 0,
+      messageCount: 0,
+      generatedImageCount: 0,
+      usageBytes,
+      quotaBytes,
+    };
   } finally {
     db?.close();
   }

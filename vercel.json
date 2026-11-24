@@ -3,6 +3,12 @@
   "functions": {
     "api/chat.ts": {
       "maxDuration": 60
+    },
+    "api/live-token.ts": {
+      "maxDuration": 30
+    },
+    "api/image.ts": {
+      "maxDuration": 60
     }
   },
   "rewrites": [

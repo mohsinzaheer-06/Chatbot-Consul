@@ -4,15 +4,16 @@ import {
   Menu,
   Moon,
   PanelLeftOpen,
-  Plus,
   RefreshCw,
   Settings,
+  SquarePen,
   Sun,
   Trash2,
   X,
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { ChatInput } from './components/ChatInput';
+import { LiveVoiceModal } from './components/LiveVoiceModal';
 import { MessageBubble } from './components/MessageBubble';
 import { SettingsModal } from './components/SettingsModal';
 import { Sidebar } from './components/Sidebar';
@@ -32,9 +33,14 @@ export default function App() {
     errorState,
     clearError,
     storageWarning,
+    apiStatus,
+    refreshApiStatus,
     updateTheme,
     updateResponseLength,
+    updatePreferredLanguage,
     updateModel,
+    updateLiveVoiceName,
+    updateMaxUploadMb,
     createNewChat,
     selectConversation,
     renameConversation,
@@ -48,6 +54,7 @@ export default function App() {
     stopGeneration,
     regenerateLastResponse,
     retryLastError,
+    saveVoiceTranscriptToChat,
     exportJson,
     exportTxt,
     importJson,
@@ -58,6 +65,7 @@ export default function App() {
   const [isDesktopSidebarOpen, setIsDesktopSidebarOpen] = useState(true);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isLiveVoiceOpen, setIsLiveVoiceOpen] = useState(false);
   const [isSelectionMode, setIsSelectionMode] = useState(false);
   const [selectedMessageIds, setSelectedMessageIds] = useState<string[]>([]);
   const [confirmClearChat, setConfirmClearChat] = useState(false);
@@ -88,8 +96,14 @@ export default function App() {
     );
   };
 
+  const enterSelectionWith = (messageId: string) => {
+    setIsSelectionMode(true);
+    setSelectedMessageIds((prev) => (prev.includes(messageId) ? prev : [...prev, messageId]));
+    setConfirmClearChat(false);
+  };
+
   return (
-    <div className="flex h-dvh w-full overflow-hidden bg-[#F5F4EE] text-zinc-950 dark:bg-[#09090E] dark:text-zinc-100">
+    <div className="flex h-dvh w-full overflow-hidden bg-[#FAF9F6] text-[#18191B] dark:bg-[#131416] dark:text-[#ECECEF]">
       <Sidebar
         conversations={filteredConversations}
         activeConversationId={activeConversationId}
@@ -107,14 +121,14 @@ export default function App() {
       />
 
       <div className="flex min-w-0 flex-1 flex-col">
-        {/* Clean single-row header */}
-        <header className="flex h-13 shrink-0 items-center justify-between gap-4 border-b-2 border-emerald-600/20 bg-[#F2FBF6]/95 px-3 backdrop-blur-xs sm:px-5 dark:border-emerald-400/20 dark:bg-[#0D1617]/95">
-          <div className="flex min-w-0 items-center gap-2">
+        {/* Clean, Spacious Top Header */}
+        <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-black/[0.06] bg-[#FAF9F6]/90 px-3.5 pt-[env(safe-area-inset-top)] backdrop-blur-xs sm:px-6 dark:border-white/[0.06] dark:bg-[#131416]/90">
+          <div className="flex min-w-0 items-center gap-1.5 sm:gap-2">
             <button
               type="button"
               onClick={() => setIsMobileSidebarOpen(true)}
               aria-label="Open conversation sidebar"
-              className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-zinc-600 transition-colors hover:bg-zinc-100 hover:text-zinc-950 focus-visible:outline-2 focus-visible:outline-blue-600 lg:hidden dark:text-zinc-300 dark:hover:bg-white/10 dark:hover:text-white"
+              className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-[#5C6066] transition-colors hover:bg-black/[0.05] hover:text-[#18191B] focus-visible:outline-2 focus-visible:outline-[#3D6B58] lg:hidden dark:text-[#9CA1A8] dark:hover:bg-white/[0.07] dark:hover:text-white"
             >
               <Menu className="h-5 w-5" aria-hidden="true" />
             </button>
@@ -124,18 +138,19 @@ export default function App() {
                 type="button"
                 onClick={() => setIsDesktopSidebarOpen(true)}
                 aria-label="Expand sidebar"
-                className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-xl text-zinc-600 transition-colors hover:bg-zinc-100 hover:text-zinc-950 focus-visible:outline-2 focus-visible:outline-blue-600 lg:inline-flex dark:text-zinc-300 dark:hover:bg-white/10 dark:hover:text-white"
+                title="Expand sidebar"
+                className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-xl text-[#5C6066] transition-colors hover:bg-black/[0.05] hover:text-[#18191B] focus-visible:outline-2 focus-visible:outline-[#3D6B58] lg:inline-flex dark:text-[#9CA1A8] dark:hover:bg-white/[0.07] dark:hover:text-white"
               >
                 <PanelLeftOpen className="h-4 w-4" aria-hidden="true" />
               </button>
             )}
 
-            <span className="font-display truncate text-sm font-bold tracking-tight text-zinc-950 dark:text-white">
+            <span className="font-display truncate text-[15px] font-semibold tracking-tight text-[#18191B] dark:text-[#ECECEF]">
               {activeConversation ? activeConversation.title : 'Consul AI'}
             </span>
           </div>
 
-          <div className="flex shrink-0 items-center gap-1.5">
+          <div className="flex shrink-0 items-center gap-1">
             {activeConversation && messages.length > 0 && !isGenerating && (
               <button
                 type="button"
@@ -145,13 +160,14 @@ export default function App() {
                   setConfirmClearChat(false);
                 }}
                 aria-label={isSelectionMode ? 'Exit message selection' : 'Select messages'}
-                className={`inline-flex h-9 items-center gap-1.5 rounded-xl border px-2.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                title={isSelectionMode ? 'Done selecting' : 'Select messages'}
+                className={`hidden sm:inline-flex h-9 items-center gap-1.5 rounded-xl px-2.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
                   isSelectionMode
-                    ? 'border-blue-600 bg-blue-50 text-blue-700 dark:border-blue-400 dark:bg-blue-500/15 dark:text-blue-300'
-                    : 'border-zinc-900/12 bg-[#FAF9F5] text-zinc-700 hover:bg-zinc-100 hover:text-zinc-950 dark:border-white/12 dark:bg-white/[0.06] dark:text-zinc-200 dark:hover:bg-white/10'
+                    ? 'bg-[#3D6B58]/12 text-[#3D6B58] dark:bg-[#6BA588]/18 dark:text-[#7CC0A3]'
+                    : 'text-[#5C6066] hover:bg-black/[0.05] hover:text-[#18191B] dark:text-[#9CA1A8] dark:hover:bg-white/[0.07] dark:hover:text-white'
                 }`}
               >
-                <CheckSquare className="h-3.5 w-3.5" aria-hidden="true" />
+                <CheckSquare className="h-4 w-4 sm:h-3.5 sm:w-3.5" aria-hidden="true" />
                 <span className="hidden sm:inline">{isSelectionMode ? 'Done' : 'Select'}</span>
               </button>
             )}
@@ -160,12 +176,13 @@ export default function App() {
               type="button"
               onClick={createNewChat}
               aria-label="Start new chat"
+              title="New chat"
               className={`${
                 isDesktopSidebarOpen ? 'lg:hidden' : ''
-              } inline-flex h-9 items-center gap-1.5 rounded-xl border border-zinc-900/12 bg-[#FAF9F5] px-2.5 text-xs font-semibold text-zinc-800 transition-colors hover:bg-zinc-100 hover:text-zinc-950 focus-visible:outline-2 focus-visible:outline-blue-600 dark:border-white/12 dark:bg-white/[0.06] dark:text-zinc-100 dark:hover:bg-white/10 whitespace-nowrap shrink-0`}
+              } inline-flex h-11 w-11 items-center justify-center rounded-xl text-[#5C6066] transition-colors hover:bg-black/[0.05] hover:text-[#18191B] focus-visible:outline-2 focus-visible:outline-[#3D6B58] sm:h-9 sm:w-auto sm:gap-1.5 sm:px-2.5 dark:text-[#9CA1A8] dark:hover:bg-white/[0.07] dark:hover:text-white whitespace-nowrap shrink-0`}
             >
-              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>New chat</span>
+              <SquarePen className="h-4.5 w-4.5 sm:h-4 sm:w-4" aria-hidden="true" />
+              <span className="hidden text-xs font-medium sm:inline">New chat</span>
             </button>
 
             <button
@@ -174,12 +191,13 @@ export default function App() {
               aria-label={
                 settings.theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'
               }
-              className="inline-flex h-9 w-9 items-center justify-center rounded-xl text-zinc-600 transition-colors hover:bg-zinc-100 hover:text-zinc-950 focus-visible:outline-2 focus-visible:outline-blue-600 dark:text-zinc-300 dark:hover:bg-white/10 dark:hover:text-white"
+              title={settings.theme === 'dark' ? 'Light mode' : 'Dark mode'}
+              className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-[#5C6066] transition-colors hover:bg-black/[0.05] hover:text-[#18191B] focus-visible:outline-2 focus-visible:outline-[#3D6B58] sm:h-9 sm:w-9 dark:text-[#9CA1A8] dark:hover:bg-white/[0.07] dark:hover:text-white"
             >
               {settings.theme === 'dark' ? (
-                <Sun className="h-4 w-4" aria-hidden="true" />
+                <Sun className="h-4.5 w-4.5 sm:h-4 sm:w-4" aria-hidden="true" />
               ) : (
-                <Moon className="h-4 w-4" aria-hidden="true" />
+                <Moon className="h-4.5 w-4.5 sm:h-4 sm:w-4" aria-hidden="true" />
               )}
             </button>
 
@@ -187,17 +205,18 @@ export default function App() {
               type="button"
               onClick={() => setIsSettingsOpen(true)}
               aria-label="Open settings"
-              className="inline-flex h-9 w-9 items-center justify-center rounded-xl text-zinc-600 transition-colors hover:bg-zinc-100 hover:text-zinc-950 focus-visible:outline-2 focus-visible:outline-blue-600 dark:text-zinc-300 dark:hover:bg-white/10 dark:hover:text-white"
+              title="Settings & Status"
+              className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-[#5C6066] transition-colors hover:bg-black/[0.05] hover:text-[#18191B] focus-visible:outline-2 focus-visible:outline-[#3D6B58] sm:h-9 sm:w-9 dark:text-[#9CA1A8] dark:hover:bg-white/[0.07] dark:hover:text-white"
             >
-              <Settings className="h-4 w-4" aria-hidden="true" />
+              <Settings className="h-4.5 w-4.5 sm:h-4 sm:w-4" aria-hidden="true" />
             </button>
           </div>
         </header>
 
-        {/* Bulk message management toolbar when Select mode is active */}
+        {/* Bulk message selection toolbar */}
         {isSelectionMode && activeConversation && messages.length > 0 && (
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-900/10 bg-[#FAF9F5] px-4 py-2 text-xs dark:border-white/10 dark:bg-[#12121B]">
-            <span className="font-medium text-zinc-700 dark:text-zinc-200">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-black/[0.07] bg-[#F3F2EE] px-4 py-2 text-xs sm:px-6 dark:border-white/[0.08] dark:bg-[#1B1C1F]">
+            <span className="font-medium text-[#3F4349] dark:text-[#D5D8DD]">
               {selectedMessageIds.length} selected
             </span>
             <div className="flex flex-wrap items-center gap-2">
@@ -209,7 +228,7 @@ export default function App() {
                   setSelectedMessageIds([]);
                   setIsSelectionMode(false);
                 }}
-                className="inline-flex min-h-[30px] items-center gap-1.5 rounded-lg bg-rose-600 px-2.5 py-1 font-medium text-white hover:bg-rose-700 disabled:opacity-40"
+                className="inline-flex min-h-[32px] items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-1 font-medium text-white hover:bg-rose-700 disabled:opacity-40"
               >
                 <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
                 <span>Delete selected</span>
@@ -219,12 +238,12 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => setConfirmClearChat(true)}
-                  className="inline-flex min-h-[30px] items-center gap-1 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1 font-medium text-rose-700 hover:bg-rose-100 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-300"
+                  className="inline-flex min-h-[32px] items-center gap-1 rounded-lg border border-rose-500/25 bg-rose-500/8 px-3 py-1 font-medium text-rose-700 hover:bg-rose-500/15 dark:text-rose-300"
                 >
                   <span>Clear chat</span>
                 </button>
               ) : (
-                <div className="flex items-center gap-1.5 rounded-lg border border-rose-300 bg-rose-50 px-2 py-0.5 dark:border-rose-900/60 dark:bg-rose-950/50">
+                <div className="flex items-center gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-2.5 py-1">
                   <button
                     type="button"
                     onClick={() => {
@@ -240,7 +259,7 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => setConfirmClearChat(false)}
-                    className="text-zinc-600 hover:underline dark:text-zinc-300"
+                    className="text-[#5C6066] hover:underline dark:text-[#9CA1A8]"
                   >
                     Cancel
                   </button>
@@ -255,7 +274,7 @@ export default function App() {
                   setConfirmClearChat(false);
                 }}
                 aria-label="Close selection toolbar"
-                className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-zinc-500 hover:bg-zinc-200/70 dark:text-zinc-400 dark:hover:bg-white/10"
+                className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-[#5C6066] hover:bg-black/[0.05] dark:text-[#9CA1A8] dark:hover:bg-white/[0.08]"
               >
                 <X className="h-3.5 w-3.5" aria-hidden="true" />
               </button>
@@ -263,13 +282,13 @@ export default function App() {
           </div>
         )}
 
-        {/* Main Scrollable Chat Viewport */}
+        {/* Main Scrollable Chat Canvas */}
         <main className="flex flex-1 flex-col overflow-y-auto">
           {storageWarning && (
-            <div className="mx-auto mt-3 w-full max-w-3xl px-4">
+            <div className="mx-auto mt-3 w-full max-w-[760px] px-5 sm:px-8">
               <div
                 role="status"
-                className="flex items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-3.5 py-2.5 text-xs text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200"
+                className="flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3.5 py-2.5 text-xs text-amber-900 dark:text-amber-200"
               >
                 <AlertCircle className="h-4 w-4 shrink-0" aria-hidden="true" />
                 <span>{storageWarning}</span>
@@ -280,7 +299,7 @@ export default function App() {
           {messages.length === 0 ? (
             <WelcomeScreen detectedContext={detectedContext} onSelectPrompt={sendMessage} />
           ) : (
-            <div className="mx-auto w-full max-w-3xl flex-1 space-y-4 px-3 py-6 sm:px-6">
+            <div className="mx-auto w-full max-w-[760px] flex-1 space-y-7 px-5 pt-6 pb-8 sm:space-y-8 sm:px-8 sm:pt-8 sm:pb-10">
               {messages.map((msg) => (
                 <MessageBubble
                   key={msg.id}
@@ -290,6 +309,7 @@ export default function App() {
                   isSelectionMode={isSelectionMode}
                   isSelected={selectedMessageIds.includes(msg.id)}
                   onToggleSelect={() => toggleMessageSelection(msg.id)}
+                  onEnterSelectionMode={() => enterSelectionWith(msg.id)}
                   onSelectFollowUp={sendMessage}
                   onRegenerate={regenerateLastResponse}
                   onEditUserMessage={
@@ -308,7 +328,7 @@ export default function App() {
               {errorState && (
                 <div
                   role="alert"
-                  className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-rose-300 bg-rose-50 px-4 py-3 text-sm text-rose-800 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-200"
+                  className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-rose-500/25 bg-rose-500/8 px-4 py-3 text-sm text-rose-800 dark:text-rose-200"
                 >
                   <div className="flex items-start gap-2.5">
                     <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
@@ -319,7 +339,7 @@ export default function App() {
                       <button
                         type="button"
                         onClick={retryLastError}
-                        className="inline-flex min-h-[34px] items-center gap-1.5 rounded-lg bg-rose-700 px-3 py-1 text-xs font-medium text-white hover:bg-rose-800 whitespace-nowrap"
+                        className="inline-flex min-h-[34px] items-center gap-1.5 rounded-xl bg-rose-600 px-3 py-1 text-xs font-medium text-white hover:bg-rose-700 whitespace-nowrap"
                       >
                         <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
                         <span>Retry</span>
@@ -328,7 +348,7 @@ export default function App() {
                     <button
                       type="button"
                       onClick={clearError}
-                      className="min-h-[34px] rounded-lg px-2.5 py-1 text-xs font-medium text-rose-700 hover:bg-rose-100 dark:text-rose-300 dark:hover:bg-rose-900/50 whitespace-nowrap"
+                      className="min-h-[34px] rounded-xl px-2.5 py-1 text-xs font-medium text-rose-700 hover:bg-rose-500/10 dark:text-rose-300 whitespace-nowrap"
                     >
                       Dismiss
                     </button>
@@ -344,20 +364,37 @@ export default function App() {
         <ChatInput
           isGenerating={isGenerating}
           focusSignal={focusInputSignal}
+          maxUploadMb={settings.maxUploadMb}
           onSend={sendMessage}
           onStop={stopGeneration}
+          onOpenLiveVoice={() => setIsLiveVoiceOpen(true)}
         />
       </div>
+
+      <LiveVoiceModal
+        isOpen={isLiveVoiceOpen}
+        voiceName={settings.liveVoiceName ?? 'Zephyr'}
+        preferredLanguage={settings.preferredLanguage}
+        apiStatus={apiStatus}
+        onChangeVoiceName={updateLiveVoiceName}
+        onSaveTranscript={saveVoiceTranscriptToChat}
+        onClose={() => setIsLiveVoiceOpen(false)}
+      />
 
       <SettingsModal
         isOpen={isSettingsOpen}
         settings={settings}
         conversationCount={conversations.length}
+        apiStatus={apiStatus}
         detectedContext={detectedContext}
         onClose={() => setIsSettingsOpen(false)}
+        onRefreshApiStatus={refreshApiStatus}
         onUpdateTheme={updateTheme}
         onUpdateResponseLength={updateResponseLength}
+        onUpdatePreferredLanguage={updatePreferredLanguage}
         onUpdateModel={updateModel}
+        onUpdateLiveVoiceName={updateLiveVoiceName}
+        onUpdateMaxUploadMb={updateMaxUploadMb}
         onExportJson={exportJson}
         onExportTxt={exportTxt}
         onImportJson={importJson}
