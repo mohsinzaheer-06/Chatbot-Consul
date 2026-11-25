@@ -148,11 +148,11 @@ test('validateChatRequest rejects empty or oversized messages and caps history, 
   }
 });
 
-test('resolveEligibleModel defaults to gemini-3.8-flash and blocks deprecated models', () => {
-  assert.equal(resolveEligibleModel('gemini-1.5-pro', null), 'gemini-3.8-flash');
-  assert.equal(resolveEligibleModel('gemini-2.0-flash', 'gemini-1.5-flash'), 'gemini-3.8-flash');
+test('resolveEligibleModel defaults to gemini-3.1-flash-lite and blocks deprecated models', () => {
+  assert.equal(resolveEligibleModel('gemini-1.5-pro', null), 'gemini-3.1-flash-lite');
+  assert.equal(resolveEligibleModel('gemini-2.0-flash', 'gemini-1.5-flash'), 'gemini-3.1-flash-lite');
   assert.equal(resolveEligibleModel(undefined, 'gemini-4-hydrogen'), 'gemini-4-hydrogen');
-  assert.equal(resolveEligibleModel('gemini-3.1-flash-lite', 'gemini-3.8-flash'), 'gemini-3.1-flash-lite');
+  assert.equal(resolveEligibleModel('gemini-3.8-flash', 'gemini-3.1-flash-lite'), 'gemini-3.8-flash');
   assert.ok(buildSystemInstruction('concise').includes('---FOLLOWUPS---'));
 });
 
@@ -448,7 +448,7 @@ test('resolveLiveModel, resolveConfiguredImageModel, and getImageProviderAvailab
 
     const status = getImageProviderAvailability();
     assert.equal(status.available, true);
-    assert.equal(status.provider, 'pollinations');
+    assert.equal(status.provider, 'aihorde');
   } finally {
     if (prevHf !== undefined) process.env.HF_API_TOKEN = prevHf;
     else delete process.env.HF_API_TOKEN;

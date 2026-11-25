@@ -8,7 +8,7 @@ import { getGeminiClient, isApiKeyConfigured, mapGeminiError } from './gemini';
 
 export interface ImageProviderAvailability {
   available: boolean;
-  provider: 'none' | 'gemini' | 'huggingface' | 'pollinations';
+  provider: 'none' | 'gemini' | 'huggingface' | 'aihorde';
   model?: string;
   unavailableReason?: string;
 }
@@ -31,6 +31,36 @@ export interface GeneratedImageOutput {
 }
 
 const VALID_ASPECT_RATIOS = new Set<ImageAspectRatio>(['1:1', '4:3', '16:9', '3:4', '9:16']);
+
+export function detectImageIntent(message: string): boolean {
+  const trimmed = message.trim();
+  if (!trimmed || trimmed.length > 500) return false;
+  return (
+    /\b(generat\w*|creat\w*|make|draw|paint|render|illustrat\w*|design)\b.{0,50}\b(image|images|picture|pictures|pic|pics|photo|photos|illustration|art|artwork|wallpaper|wallpapers|portrait|icon|logo|banner|sketch|poster|drawing)\b/i.test(
+      trimmed
+    ) ||
+    /^(?:image of|picture of|photo of|wallpaper of|draw me|draw a|draw an|paint a|paint an|sketch a|sketch an|create an? image|generat\w* an? image|make an? image|make me an? image)\b/i.test(
+      trimmed
+    )
+  );
+}
+
+export function inferImageAspectRatio(message: string): ImageAspectRatio {
+  const lower = message.toLowerCase();
+  if (
+    /\b(desktop|laptop|widescreen|landscape|banner|wallpaper|16:9|panoramic|ultrawide|cover)\b/.test(
+      lower
+    )
+  ) {
+    return '16:9';
+  }
+  if (/\b(phone|mobile|story|stories|reel|vertical|portrait|9:16|lockscreen)\b/.test(lower)) {
+    return '9:16';
+  }
+  if (/\b(4:3)\b/.test(lower)) return '4:3';
+  if (/\b(3:4)\b/.test(lower)) return '3:4';
+  return '1:1';
+}
 
 const ASPECT_RATIO_DIMENSIONS: Record<ImageAspectRatio, { width: number; height: number }> = {
   '1:1': { width: 1024, height: 1024 },
@@ -65,8 +95,8 @@ export function getImageProviderAvailability(): ImageProviderAvailability {
 
   return {
     available: true,
-    provider: 'pollinations',
-    model: 'flux-free',
+    provider: 'aihorde',
+    model: 'stable_diffusion_free',
   };
 }
 
@@ -267,7 +297,157 @@ async function generateWithConfiguredGeminiModel(
   return results;
 }
 
-async function generateWithPollinations(
+const AI_HORDE_DIMENSIONS: Record<ImageAspectRatio, { width: number; height: number }> = {
+  '1:1': { width: 512, height: 512 },
+  '4:3': { width: 576, height: 448 },
+  '16:9': { width: 640, height: 384 },
+  '3:4': { width: 448, height: 576 },
+  '9:16': { width: 384, height: 640 },
+};
+
+async function generateGeminiSvgArt(
+  prompt: string,
+  aspectRatio: ImageAspectRatio
+): Promise<string | null> {
+  if (!isApiKeyConfigured()) return null;
+  const dims = ASPECT_RATIO_DIMENSIONS[aspectRatio];
+  const ai = getGeminiClient();
+  for (const model of ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-3.6-flash']) {
+    try {
+      const resp = await Promise.race([
+        ai.models.generateContent({
+          model,
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                {
+                  text: `Create a rich, detailed, visually stunning standalone SVG artwork (${dims.width}x${dims.height} viewBox="0 0 ${dims.width} ${dims.height}") depicting: "${prompt}". Use layered gradients, atmospheric lighting, clean vector silhouettes/shapes, depth, and vibrant composition. Output ONLY raw <svg ...>...</svg> markup with zero markdown fences or explanations.`,
+                },
+              ],
+            },
+          ],
+          config: { maxOutputTokens: 2048, temperature: 0.7 },
+        }),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 4500)),
+      ]);
+      const raw = (resp.text ?? '')
+        .trim()
+        .replace(/^```(?:svg|xml|html)?\s*/i, '')
+        .replace(/\s*```$/i, '')
+        .trim();
+      const start = raw.indexOf('<svg');
+      const end = raw.lastIndexOf('</svg>');
+      if (start !== -1 && end > start) {
+        const svg = raw.slice(start, end + 6);
+        if (!/<script|onload=|onerror=|javascript:/i.test(svg)) {
+          return svg;
+        }
+      }
+    } catch {
+      // Try next fast model
+    }
+  }
+  return null;
+}
+
+async function generateSingleWithAiHorde(
+  styledPrompt: string,
+  aspectRatio: ImageAspectRatio,
+  variantIndex: number
+): Promise<GeneratedImageOutput | null> {
+  const dims = AI_HORDE_DIMENSIONS[aspectRatio];
+  const hordeKey = process.env.AI_HORDE_API_KEY?.trim() || '0000000000';
+
+  const submitController = new AbortController();
+  const submitTimer = setTimeout(() => submitController.abort(), 5000);
+  let jobId = '';
+  try {
+    const submitRes = await fetch('https://aihorde.net/api/v2/generate/async', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        apikey: hordeKey,
+        'Client-Agent': 'ConsulAI:1.0:https://consul-ai.vercel.app',
+      },
+      body: JSON.stringify({
+        prompt: `${styledPrompt}, high quality, detailed`,
+        params: {
+          width: dims.width,
+          height: dims.height,
+          steps: 12,
+          n: 1,
+          sampler_name: 'k_euler_a',
+        },
+        nsfw: false,
+        censor_nsfw: true,
+        r2: true,
+      }),
+      signal: submitController.signal,
+    });
+    if (!submitRes.ok) return null;
+    const submitData = (await submitRes.json()) as { id?: string };
+    if (!submitData.id) return null;
+    jobId = submitData.id;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(submitTimer);
+  }
+
+  const deadline = Date.now() + 18_000;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 1500));
+    const statusController = new AbortController();
+    const statusTimer = setTimeout(() => statusController.abort(), 4000);
+    try {
+      const statusRes = await fetch(
+        `https://aihorde.net/api/v2/generate/status/${encodeURIComponent(jobId)}`,
+        { signal: statusController.signal }
+      );
+      if (!statusRes.ok) continue;
+      const statusData = (await statusRes.json()) as {
+        done?: boolean;
+        faulted?: boolean;
+        generations?: Array<{ img?: string; model?: string }>;
+      };
+      if (statusData.faulted) return null;
+      if (statusData.done && statusData.generations?.[0]?.img) {
+        const imgUrl = statusData.generations[0].img;
+        if (imgUrl.startsWith('https://')) {
+          const imgController = new AbortController();
+          const imgTimer = setTimeout(() => imgController.abort(), 6000);
+          try {
+            const imgRes = await fetch(imgUrl, { signal: imgController.signal });
+            if (imgRes.ok) {
+              const mime = imgRes.headers.get('content-type') || 'image/webp';
+              if (mime.startsWith('image/')) {
+                const b64 = Buffer.from(await imgRes.arrayBuffer()).toString('base64');
+                return {
+                  dataUrl: `data:${mime};base64,${b64}`,
+                  mimeType: mime,
+                  provider: 'aihorde',
+                  model: statusData.generations[0].model || 'stable_diffusion_free',
+                  variantIndex,
+                };
+              }
+            }
+          } finally {
+            clearTimeout(imgTimer);
+          }
+        }
+        return null;
+      }
+    } catch {
+      // Keep polling until deadline
+    } finally {
+      clearTimeout(statusTimer);
+    }
+  }
+  return null;
+}
+
+async function generateWithFreeAiHorde(
   req: GenerateImagesRequest,
   model: string
 ): Promise<GeneratedImageOutput[]> {
@@ -276,46 +456,33 @@ async function generateWithPollinations(
 
   for (let i = 0; i < req.count; i++) {
     const styledPrompt = composeStyledPrompt(req.prompt, req.style, i, req.count);
-    const seed = Math.floor(Math.random() * 2_000_000_000) + i * 97;
-    const endpoint = `https://image.pollinations.ai/prompt/${encodeURIComponent(
-      styledPrompt
-    )}?width=${dims.width}&height=${dims.height}&seed=${seed}&nologo=true`;
+    const hordeOut = await generateSingleWithAiHorde(styledPrompt, req.aspectRatio, i);
+    if (hordeOut) {
+      results.push(hordeOut);
+      continue;
+    }
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 35_000);
-    try {
-      const response = await fetch(endpoint, {
-        method: 'GET',
-        headers: {
-          Accept: 'image/*',
-        },
-        signal: controller.signal,
-      });
-
-      if (!response.ok) {
-        throw new Error(`Free image provider returned HTTP ${response.status}`);
-      }
-
-      const contentType = response.headers.get('content-type') || 'image/jpeg';
-      const arrayBuf = await response.arrayBuffer();
-      const base64 = Buffer.from(arrayBuf).toString('base64');
+    const geminiSvg = await generateGeminiSvgArt(styledPrompt, req.aspectRatio);
+    if (geminiSvg) {
       results.push({
-        dataUrl: `data:${contentType};base64,${base64}`,
-        mimeType: contentType,
-        provider: 'pollinations',
-        model,
+        dataUrl: `data:image/svg+xml;base64,${Buffer.from(geminiSvg).toString('base64')}`,
+        mimeType: 'image/svg+xml',
+        provider: 'gemini-vector',
+        model: 'gemini-3.1-flash-lite',
         variantIndex: i,
       });
-    } catch {
-      const escapeXml = (str: string) =>
-        str
-          .replace(/&/g, '&amp;')
-          .replace(/</g, '&lt;')
-          .replace(/>/g, '&gt;')
-          .replace(/"/g, '&quot;')
-          .replace(/'/g, '&apos;');
+      continue;
+    }
 
-      const svgFallback = `<svg xmlns="http://www.w3.org/2000/svg" width="${dims.width}" height="${dims.height}" viewBox="0 0 ${dims.width} ${dims.height}">
+    const escapeXml = (str: string) =>
+      str
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;');
+
+    const svgFallback = `<svg xmlns="http://www.w3.org/2000/svg" width="${dims.width}" height="${dims.height}" viewBox="0 0 ${dims.width} ${dims.height}">
   <defs>
     <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" stop-color="#1e1b4b"/>
@@ -330,19 +497,15 @@ async function generateWithPollinations(
   <rect width="100%" height="100%" fill="url(#bg)"/>
   <circle cx="${dims.width * 0.5}" cy="${dims.height * 0.5}" r="${Math.min(dims.width, dims.height) * 0.35}" fill="url(#glow)"/>
   <text x="50%" y="45%" dominant-baseline="middle" text-anchor="middle" fill="#f8fafc" font-family="system-ui, sans-serif" font-size="28" font-weight="700">${escapeXml(req.prompt.slice(0, 48))}</text>
-  <text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle" fill="#cbd5e1" font-family="system-ui, sans-serif" font-size="15">Style: ${req.style} · Free Generative Art</text>
+  <text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle" fill="#cbd5e1" font-family="system-ui, sans-serif" font-size="15">Consul AI · Free Generative Art (${req.aspectRatio})</text>
 </svg>`;
-      const base64Svg = Buffer.from(svgFallback).toString('base64');
-      results.push({
-        dataUrl: `data:image/svg+xml;base64,${base64Svg}`,
-        mimeType: 'image/svg+xml',
-        provider: 'pollinations-fallback',
-        model,
-        variantIndex: i,
-      });
-    } finally {
-      clearTimeout(timer);
-    }
+    results.push({
+      dataUrl: `data:image/svg+xml;base64,${Buffer.from(svgFallback).toString('base64')}`,
+      mimeType: 'image/svg+xml',
+      provider: 'aihorde-fallback',
+      model,
+      variantIndex: i,
+    });
   }
 
   return results;
@@ -370,13 +533,13 @@ export async function generateImagesWithProvider(
         ? await generateWithHuggingFace(req, availability.model)
         : availability.provider === 'gemini'
           ? await generateWithConfiguredGeminiModel(req, availability.model)
-          : await generateWithPollinations(req, availability.model);
+          : await generateWithFreeAiHorde(req, availability.model);
 
     return {
       ok: true,
       images,
-      provider: availability.provider,
-      model: availability.model,
+      provider: images[0]?.provider ?? availability.provider,
+      model: images[0]?.model ?? availability.model,
     };
   } catch (err) {
     if (availability.provider === 'gemini') {

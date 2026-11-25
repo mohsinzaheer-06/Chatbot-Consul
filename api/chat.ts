@@ -1,6 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { GoogleGenAI, ThinkingLevel, Type, type Content, type Part } from '@google/genai';
-import { generateImagesWithProvider } from '../server/imageProvider';
 
 type ResponseLength = 'quick' | 'balanced' | 'detailed' | 'concise';
 type PreferredLanguage = 'auto' | 'en' | 'ur' | 'roman-ur';
@@ -45,15 +44,20 @@ interface UserLocationContext {
 
 type VercelIncomingMessage = IncomingMessage & { body?: unknown };
 
-const ELIGIBLE_MODELS = ['gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-4-hydrogen'] as const;
-const DEFAULT_MODEL = 'gemini-3.8-flash';
+const ELIGIBLE_MODELS = [
+  'gemini-3.1-flash-lite',
+  'gemini-3.5-flash-lite',
+  'gemini-3.8-flash',
+  'gemini-4-hydrogen',
+] as const;
+const DEFAULT_MODEL = 'gemini-3.1-flash-lite';
 const MAX_MESSAGE_CHARS = 8000;
 const MAX_HISTORY_TURNS = 20;
 const MAX_HISTORY_ITEM_CHARS = 6000;
 const FOLLOWUP_DELIMITER = '---FOLLOWUPS---';
 const GEO_CACHE_TTL_MS = 15 * 60 * 1000;
-const GEO_FETCH_TIMEOUT_MS = 850;
-const WEB_FETCH_TIMEOUT_MS = 1400;
+const GEO_FETCH_TIMEOUT_MS = 350;
+const WEB_FETCH_TIMEOUT_MS = 900;
 const SEARCH_COOLDOWN_MS = 60_000;
 const MODEL_NOT_FOUND_COOLDOWN_MS = 5 * 60_000;
 
@@ -107,6 +111,306 @@ function resolveModel(requested?: string | null, envDefault?: string | null): st
     return trimmed;
   }
   return DEFAULT_MODEL;
+}
+
+function getResponseGenerationConfig(responseLength: ResponseLength): {
+  maxOutputTokens: number;
+  temperature: number;
+} {
+  if (responseLength === 'quick' || responseLength === 'concise') {
+    return { maxOutputTokens: 768, temperature: 0.45 };
+  }
+  if (responseLength === 'detailed') {
+    return { maxOutputTokens: 4096, temperature: 0.7 };
+  }
+  return { maxOutputTokens: 1792, temperature: 0.6 };
+}
+
+type ImageAspectRatio = '1:1' | '4:3' | '16:9' | '3:4' | '9:16';
+
+const ASPECT_RATIO_DIMENSIONS: Record<ImageAspectRatio, { width: number; height: number }> = {
+  '1:1': { width: 1024, height: 1024 },
+  '4:3': { width: 1024, height: 768 },
+  '16:9': { width: 1024, height: 576 },
+  '3:4': { width: 768, height: 1024 },
+  '9:16': { width: 576, height: 1024 },
+};
+
+const PAID_GEMINI_IMAGE_MODELS = new Set([
+  'gemini-3.1-flash-lite-image',
+  'gemini-nano-banana-2.1',
+  'gemini-3-pro-image',
+]);
+
+function detectImageIntent(message: string): boolean {
+  const trimmed = message.trim();
+  if (!trimmed || trimmed.length > 500) return false;
+  return (
+    /\b(generat\w*|creat\w*|make|draw|paint|render|illustrat\w*|design)\b.{0,50}\b(image|images|picture|pictures|pic|pics|photo|photos|illustration|art|artwork|wallpaper|wallpapers|portrait|icon|logo|banner|sketch|poster|drawing)\b/i.test(
+      trimmed
+    ) ||
+    /^(?:image of|picture of|photo of|wallpaper of|draw me|draw a|draw an|paint a|paint an|sketch a|sketch an|create an? image|generat\w* an? image|make an? image|make me an? image)\b/i.test(
+      trimmed
+    )
+  );
+}
+
+function inferImageAspectRatio(message: string): ImageAspectRatio {
+  const lower = message.toLowerCase();
+  if (
+    /\b(desktop|laptop|widescreen|landscape|banner|wallpaper|16:9|panoramic|ultrawide|cover)\b/.test(
+      lower
+    )
+  ) {
+    return '16:9';
+  }
+  if (/\b(phone|mobile|story|stories|reel|vertical|portrait|9:16|lockscreen)\b/.test(lower)) {
+    return '9:16';
+  }
+  if (/\b(4:3)\b/.test(lower)) return '4:3';
+  if (/\b(3:4)\b/.test(lower)) return '3:4';
+  return '1:1';
+}
+
+async function generateFreeChatImage(
+  prompt: string,
+  aspectRatio: ImageAspectRatio,
+  geminiKey: string
+): Promise<{ dataUrl: string; model: string }> {
+  const dims = ASPECT_RATIO_DIMENSIONS[aspectRatio];
+  const hfToken = process.env.HF_API_TOKEN?.trim();
+  const hfModel = process.env.HF_IMAGE_MODEL?.trim() || 'black-forest-labs/FLUX.1-schnell';
+
+  if (hfToken && hfToken !== 'MY_HF_TOKEN' && /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/.test(hfModel)) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 14_000);
+    try {
+      const resp = await fetch(`https://router.huggingface.co/hf-inference/models/${hfModel}`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${hfToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          inputs: prompt,
+          parameters: {
+            width: dims.width,
+            height: dims.height,
+            seed: Math.floor(Math.random() * 2_000_000_000),
+          },
+        }),
+        signal: controller.signal,
+      });
+      if (resp.ok) {
+        const mime = resp.headers.get('content-type') || 'image/png';
+        if (mime.startsWith('image/')) {
+          const b64 = Buffer.from(await resp.arrayBuffer()).toString('base64');
+          return { dataUrl: `data:${mime};base64,${b64}`, model: hfModel };
+        }
+      }
+    } catch {
+      // Fall through to next free provider
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  const geminiImgModel = process.env.GEMINI_IMAGE_MODEL?.trim();
+  if (
+    geminiImgModel &&
+    /^gemini-[a-z0-9.-]+$/i.test(geminiImgModel) &&
+    !DEPRECATED_MODELS.has(geminiImgModel.toLowerCase()) &&
+    (!PAID_GEMINI_IMAGE_MODELS.has(geminiImgModel.toLowerCase()) ||
+      process.env.ALLOW_PAID_IMAGE_MODEL === 'true')
+  ) {
+    try {
+      const imgAi = new GoogleGenAI({
+        apiKey: geminiKey,
+        httpOptions: { timeout: 15_000, headers: { 'User-Agent': 'aistudio-build' } },
+      });
+      const imgResp = await imgAi.models.generateContent({
+        model: geminiImgModel,
+        contents: { parts: [{ text: prompt }] },
+        config: { imageConfig: { aspectRatio } },
+      });
+      for (const part of imgResp.candidates?.[0]?.content?.parts ?? []) {
+        if (part.inlineData?.data) {
+          const mime = part.inlineData.mimeType || 'image/png';
+          return { dataUrl: `data:${mime};base64,${part.inlineData.data}`, model: geminiImgModel };
+        }
+      }
+    } catch {
+      // Fall through to Pollinations
+    }
+  }
+
+  const AI_HORDE_DIMENSIONS: Record<ImageAspectRatio, { width: number; height: number }> = {
+    '1:1': { width: 512, height: 512 },
+    '4:3': { width: 576, height: 448 },
+    '16:9': { width: 640, height: 384 },
+    '3:4': { width: 448, height: 576 },
+    '9:16': { width: 384, height: 640 },
+  };
+  const hDims = AI_HORDE_DIMENSIONS[aspectRatio];
+  const hordeKey = process.env.AI_HORDE_API_KEY?.trim() || '0000000000';
+  const submitController = new AbortController();
+  const submitTimer = setTimeout(() => submitController.abort(), 5000);
+  let jobId = '';
+  try {
+    const submitRes = await fetch('https://aihorde.net/api/v2/generate/async', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        apikey: hordeKey,
+        'Client-Agent': 'ConsulAI:1.0:https://consul-ai.vercel.app',
+      },
+      body: JSON.stringify({
+        prompt: `${prompt}, high quality, detailed`,
+        params: {
+          width: hDims.width,
+          height: hDims.height,
+          steps: 12,
+          n: 1,
+          sampler_name: 'k_euler_a',
+        },
+        nsfw: false,
+        censor_nsfw: true,
+        r2: true,
+      }),
+      signal: submitController.signal,
+    });
+    if (submitRes.ok) {
+      const submitData = (await submitRes.json()) as { id?: string };
+      if (submitData.id) jobId = submitData.id;
+    }
+  } catch {
+    jobId = '';
+  } finally {
+    clearTimeout(submitTimer);
+  }
+
+  if (jobId) {
+    const deadline = Date.now() + 18_000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 1500));
+      const statusController = new AbortController();
+      const statusTimer = setTimeout(() => statusController.abort(), 4000);
+      try {
+        const statusRes = await fetch(
+          `https://aihorde.net/api/v2/generate/status/${encodeURIComponent(jobId)}`,
+          { signal: statusController.signal }
+        );
+        if (!statusRes.ok) continue;
+        const statusData = (await statusRes.json()) as {
+          done?: boolean;
+          faulted?: boolean;
+          generations?: Array<{ img?: string; model?: string }>;
+        };
+        if (statusData.faulted) break;
+        if (statusData.done && statusData.generations?.[0]?.img) {
+          const imgUrl = statusData.generations[0].img;
+          if (imgUrl.startsWith('https://')) {
+            const imgController = new AbortController();
+            const imgTimer = setTimeout(() => imgController.abort(), 6000);
+            try {
+              const imgRes = await fetch(imgUrl, { signal: imgController.signal });
+              if (imgRes.ok) {
+                const mime = imgRes.headers.get('content-type') || 'image/webp';
+                if (mime.startsWith('image/')) {
+                  const b64 = Buffer.from(await imgRes.arrayBuffer()).toString('base64');
+                  return {
+                    dataUrl: `data:${mime};base64,${b64}`,
+                    model: statusData.generations[0].model || 'stable_diffusion_free',
+                  };
+                }
+              }
+            } finally {
+              clearTimeout(imgTimer);
+            }
+          }
+          break;
+        }
+      } catch {
+        // Keep polling until deadline
+      } finally {
+        clearTimeout(statusTimer);
+      }
+    }
+  }
+
+  const svgAi = new GoogleGenAI({
+    apiKey: geminiKey,
+    httpOptions: { timeout: 4500, headers: { 'User-Agent': 'aistudio-build' } },
+  });
+  for (const svgModel of ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-3.6-flash']) {
+    try {
+      const svgResp = await Promise.race([
+        svgAi.models.generateContent({
+          model: svgModel,
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                {
+                  text: `Create a rich, detailed, visually stunning standalone SVG artwork (${dims.width}x${dims.height} viewBox="0 0 ${dims.width} ${dims.height}") depicting: "${prompt}". Use layered gradients, atmospheric lighting, clean vector silhouettes/shapes, depth, and vibrant composition. Output ONLY raw <svg ...>...</svg> markup with zero markdown fences or explanations.`,
+                },
+              ],
+            },
+          ],
+          config: { maxOutputTokens: 2048, temperature: 0.7 },
+        }),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 4500)),
+      ]);
+      const raw = (svgResp.text ?? '')
+        .trim()
+        .replace(/^```(?:svg|xml|html)?\s*/i, '')
+        .replace(/\s*```$/i, '')
+        .trim();
+      const start = raw.indexOf('<svg');
+      const end = raw.lastIndexOf('</svg>');
+      if (start !== -1 && end > start) {
+        const svg = raw.slice(start, end + 6);
+        if (!/<script|onload=|onerror=|javascript:/i.test(svg)) {
+          return {
+            dataUrl: `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`,
+            model: svgModel,
+          };
+        }
+      }
+    } catch {
+      // Try next fast model
+    }
+  }
+
+  const escapeXml = (str: string) =>
+    str
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;');
+
+  const svgFallback = `<svg xmlns="http://www.w3.org/2000/svg" width="${dims.width}" height="${dims.height}" viewBox="0 0 ${dims.width} ${dims.height}">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e1b4b"/>
+      <stop offset="50%" stop-color="#3b0764"/>
+      <stop offset="100%" stop-color="#0f172a"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ec4899" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="#8b5cf6" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="100%" height="100%" fill="url(#bg)"/>
+  <circle cx="${dims.width * 0.5}" cy="${dims.height * 0.5}" r="${Math.min(dims.width, dims.height) * 0.35}" fill="url(#glow)"/>
+  <text x="50%" y="45%" dominant-baseline="middle" text-anchor="middle" fill="#f8fafc" font-family="system-ui, sans-serif" font-size="28" font-weight="700">${escapeXml(prompt.slice(0, 48))}</text>
+  <text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle" fill="#cbd5e1" font-family="system-ui, sans-serif" font-size="15">Consul AI · Free Generative Art (${aspectRatio})</text>
+</svg>`;
+  return {
+    dataUrl: `data:image/svg+xml;base64,${Buffer.from(svgFallback).toString('base64')}`,
+    model: 'stable_diffusion_free',
+  };
 }
 
 async function readRequestJson(
@@ -1195,8 +1499,10 @@ export default async function handler(
       const candidateModels = Array.from(
         new Set<string>([
           primaryModel,
-          'gemini-3.8-flash',
           'gemini-3.1-flash-lite',
+          'gemini-3.5-flash-lite',
+          'gemini-3.6-flash',
+          'gemini-3.8-flash',
           'gemini-4-hydrogen',
         ])
       );
@@ -1207,42 +1513,36 @@ export default async function handler(
       );
       const priorHistory = allContents.slice(0, -1);
       const latestParts = buildLatestUserParts(validation.data.message, validation.data.attachments);
+      const genSettings = getResponseGenerationConfig(validation.data.responseLength);
 
-      const isImageReq =
-        /\b(generate|create|make|draw|paint|render|illustrate)\b.{0,40}\b(image|picture|photo|illustration|art|wallpaper|portrait|icon|logo|banner)\b|^(?:image of|picture of|wallpaper of|draw me|create an image|generate an image|make an image|make me an image)\b/i.test(
-          validation.data.message
-        );
-
-      if (isImageReq) {
+      const hasAttachments = Boolean(
+        validation.data.attachments && validation.data.attachments.length > 0
+      );
+      if (!hasAttachments && detectImageIntent(validation.data.message)) {
         try {
-          const imageRes = await generateImagesWithProvider({
-            prompt: validation.data.message,
-            style: 'none',
-            aspectRatio: '1:1',
-            count: 1,
+          const aspectRatio = inferImageAspectRatio(validation.data.message);
+          const generated = await generateFreeChatImage(
+            validation.data.message,
+            aspectRatio,
+            apiKey
+          );
+          const safeAlt = validation.data.message.replace(/[\[\]()\r\n]/g, ' ').trim().slice(0, 80);
+          writeSseEvent(res, { type: 'meta', model: generated.model });
+          writeSseEvent(res, {
+            type: 'delta',
+            text: `Here is your generated image (${aspectRatio}):\n\n![${safeAlt || 'Generated image'}](${generated.dataUrl})`,
           });
-          if (imageRes.ok && imageRes.images.length > 0) {
-            const img = imageRes.images[0];
-            const answerText = `Here is the image generated based on your request:\n\n![${validation.data.message.slice(
-              0,
-              60
-            )}](${img.dataUrl})\n\n---\nHere are 3 follow-up questions to explore further:\n---FOLLOWUPS---\n["Can you create another variation?", "What style adjustments can we make?", "Tell me more about this subject?"]`;
-            writeSseEvent(res, { type: 'meta', model: 'flux-free' });
-            for (let i = 0; i < answerText.length; i += 24) {
-              writeSseEvent(res, { type: 'delta', text: answerText.slice(i, i + 24) });
-            }
-            writeSseEvent(res, {
-              type: 'followups',
-              questions: [
-                'Can you create another variation?',
-                'What style adjustments can we make?',
-                'Tell me more about this subject?',
-              ],
-            });
-            writeSseEvent(res, { type: 'done' });
-            if (!res.writableEnded) res.end();
-            return;
-          }
+          writeSseEvent(res, {
+            type: 'followups',
+            questions: [
+              'Create a slightly different variation of this image',
+              'Make it in a cinematic or photorealistic style',
+              'Adjust the aspect ratio or lighting',
+            ],
+          });
+          writeSseEvent(res, { type: 'done' });
+          if (!res.writableEnded) res.end();
+          return;
         } catch {
           // Fall back to text chat if image generation fails
         }
@@ -1268,10 +1568,16 @@ export default async function handler(
         const config = targetModel.startsWith('gemini-4-')
           ? {
               systemInstruction,
+              maxOutputTokens: genSettings.maxOutputTokens,
               thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
               ...toolsConfig,
             }
-          : { systemInstruction, ...toolsConfig };
+          : {
+              systemInstruction,
+              maxOutputTokens: genSettings.maxOutputTokens,
+              temperature: genSettings.temperature,
+              ...toolsConfig,
+            };
 
         if (
           priorHistory.length > 0 &&
@@ -1292,9 +1598,6 @@ export default async function handler(
       };
 
       const now = Date.now();
-      const hasAttachments = Boolean(
-        validation.data.attachments && validation.data.attachments.length > 0
-      );
       const useSearch =
         !hasAttachments &&
         /\b(weather|temperature|forecast|rain|sunny|cloudy|humidity|wind|temp|mausam|latest|news|headline|current (time|price|rate|version|events?|news)|price of|exchange rate|who is|when did|search the web|release date|stock price|live score|capital of|today'?s)\b|موسم|درجہ حرارت/i.test(
@@ -1331,7 +1634,7 @@ export default async function handler(
         ) {
           continue;
         }
-        const timeoutMs = attempt.model === 'gemini-3.8-flash' ? 6000 : attempt.search ? 10_000 : 18_000;
+        const timeoutMs = attempt.search ? 6500 : 4500;
         try {
           streamResult = await withAttemptTimeout(openStream(attempt.model, attempt.search), timeoutMs);
           break;
@@ -1339,17 +1642,24 @@ export default async function handler(
           lastErr = err;
           if (abortController.signal.aborted) break;
           const mapped = mapError(err);
+          const rawErrMsg = err instanceof Error ? err.message : String(err ?? '');
+          const isOverloaded503 = /\b503\b|UNAVAILABLE|high demand/i.test(rawErrMsg);
           if (mapped.code === 'API_KEY_INVALID' || mapped.code === 'MISSING_API_KEY') throw err;
           if (mapped.code === 'MODEL_NOT_FOUND') {
             modelNotFoundCooldownUntil.set(attempt.model, Date.now() + MODEL_NOT_FOUND_COOLDOWN_MS);
             continue;
           }
+          if (isOverloaded503) {
+            modelNotFoundCooldownUntil.set(attempt.model, Date.now() + 45_000);
+            skippedThisRequest.add(attempt.model);
+            continue;
+          }
           if (mapped.code === 'UPSTREAM_TIMEOUT') {
-            if (attempt.model === 'gemini-3.8-flash') {
-              modelNotFoundCooldownUntil.set(attempt.model, Date.now() + 60_000);
-              skippedThisRequest.add(attempt.model);
-            } else if (attempt.search) {
+            if (attempt.search) {
               searchCooldownUntil.set(attempt.model, Date.now() + SEARCH_COOLDOWN_MS);
+            } else {
+              modelNotFoundCooldownUntil.set(attempt.model, Date.now() + 45_000);
+              skippedThisRequest.add(attempt.model);
             }
             continue;
           }
@@ -1362,9 +1672,12 @@ export default async function handler(
             searchCooldownUntil.set(attempt.model, Date.now() + SEARCH_COOLDOWN_MS);
             continue;
           }
-          if (mapped.code === 'QUOTA_EXHAUSTED') continue;
+          if (mapped.code === 'QUOTA_EXHAUSTED' || mapped.code === 'BAD_REQUEST') {
+            skippedThisRequest.add(attempt.model);
+            continue;
+          }
           if (mapped.code === 'RATE_LIMIT_EXCEEDED' || mapped.retryable) {
-            await new Promise((r) => setTimeout(r, mapped.retryAfterMs ?? 500));
+            await new Promise((r) => setTimeout(r, mapped.retryAfterMs ?? 300));
             try {
               streamResult = await withAttemptTimeout(openStream(attempt.model, attempt.search), timeoutMs);
               break;
@@ -1409,25 +1722,34 @@ export default async function handler(
         }
 
         let followUps = finalized.followUps;
-        if (followUps.length === 0 && finalized.fullAnswer.length > 0) {
+        if (
+          followUps.length === 0 &&
+          finalized.fullAnswer.length > 0 &&
+          validation.data.responseLength !== 'quick' &&
+          validation.data.responseLength !== 'concise'
+        ) {
           try {
-            const resp = await ai.models.generateContent({
-              model: streamResult.model,
-              contents: `User message: ${validation.data.message}\n\nAssistant answer: ${finalized.fullAnswer}\n\nGenerate exactly 3 short, practical, non-generic follow-up questions in the exact same language and script as the assistant answer.`,
-              config: {
-                responseMimeType: 'application/json',
-                responseSchema: {
-                  type: Type.OBJECT,
-                  properties: {
-                    followUps: { type: Type.ARRAY, items: { type: Type.STRING } },
+            const resp = await withAttemptTimeout(
+              ai.models.generateContent({
+                model: streamResult.model,
+                contents: `User message: ${validation.data.message}\n\nAssistant answer: ${finalized.fullAnswer}\n\nGenerate exactly 3 short, practical, non-generic follow-up questions in the exact same language and script as the assistant answer.`,
+                config: {
+                  maxOutputTokens: 220,
+                  responseMimeType: 'application/json',
+                  responseSchema: {
+                    type: Type.OBJECT,
+                    properties: {
+                      followUps: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    },
+                    required: ['followUps'],
                   },
-                  required: ['followUps'],
+                  ...(streamResult.model.startsWith('gemini-4-')
+                    ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+                    : {}),
                 },
-                ...(streamResult.model.startsWith('gemini-4-')
-                  ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
-                  : {}),
-              },
-            });
+              }),
+              1800
+            );
             const parsed = JSON.parse((resp.text ?? '{}').trim()) as { followUps?: unknown };
             if (Array.isArray(parsed.followUps)) {
               followUps = parsed.followUps

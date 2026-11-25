@@ -684,9 +684,9 @@ export function useChatStore() {
       const hasAtt = Boolean(attachments && attachments.length > 0);
       if ((!trimmed && !hasAtt) || isGeneratingRef.current) return;
 
-      // Gentle free-tier throttle guard (900ms cooldown)
+      // Gentle free-tier throttle guard (350ms cooldown)
       const nowMs = Date.now();
-      if (nowMs - lastSendTimestampRef.current < 900) {
+      if (nowMs - lastSendTimestampRef.current < 350) {
         setErrorState({
           message: 'Please pause a moment before sending another message.',
           retryable: false,

@@ -3,9 +3,6 @@ import { GoogleGenAI } from '@google/genai';
 
 type VercelIncomingMessage = IncomingMessage & { body?: unknown };
 
-const IMAGE_UNAVAILABLE_MESSAGE =
-  'Image generation is currently unavailable because no eligible free image-generation provider is configured. No paid API will be used.';
-
 const PAID_GEMINI_IMAGE_MODELS = new Set([
   'gemini-3.1-flash-lite-image',
   'gemini-nano-banana-2.1',
@@ -90,14 +87,6 @@ export default async function handler(
           process.env.ALLOW_PAID_IMAGE_MODEL === 'true')
     );
 
-  if (!useHf && !useGemini) {
-    sendJson(res, 503, {
-      code: 'IMAGE_PROVIDER_UNAVAILABLE',
-      message: IMAGE_UNAVAILABLE_MESSAGE,
-    });
-    return;
-  }
-
   const body = await readJson(req);
   if (!body) {
     sendJson(res, 400, { code: 'INVALID_JSON', message: 'Valid JSON request body is required.' });
@@ -165,6 +154,9 @@ export default async function handler(
           throw new Error(`Hugging Face provider returned HTTP ${resp.status}: ${text.slice(0, 120)}`);
         }
         const mime = resp.headers.get('content-type') || 'image/png';
+        if (!mime.startsWith('image/')) {
+          throw new Error('Hugging Face provider did not return an image payload.');
+        }
         const b64 = Buffer.from(await resp.arrayBuffer()).toString('base64');
         images.push({
           dataUrl: `data:${mime};base64,${b64}`,
@@ -181,7 +173,7 @@ export default async function handler(
     if (useGemini && geminiKey && geminiImgModel) {
       const ai = new GoogleGenAI({
         apiKey: geminiKey,
-        httpOptions: { timeout: 45_000, headers: { 'User-Agent': 'aistudio-build' } },
+        httpOptions: { timeout: 25_000, headers: { 'User-Agent': 'aistudio-build' } },
       });
       const refB64 =
         typeof body.referenceImageBase64 === 'string'
@@ -234,7 +226,211 @@ export default async function handler(
         }
       }
       sendJson(res, 200, { ok: true, provider: 'gemini', model: geminiImgModel, images });
+      return;
     }
+
+    const dims = ASPECT_DIMS[aspectRatio];
+    const hordeDims: Record<string, { width: number; height: number }> = {
+      '1:1': { width: 512, height: 512 },
+      '4:3': { width: 576, height: 448 },
+      '16:9': { width: 640, height: 384 },
+      '3:4': { width: 448, height: 576 },
+      '9:16': { width: 384, height: 640 },
+    };
+    const hDim = hordeDims[aspectRatio] ?? { width: 512, height: 512 };
+    const hordeKey = process.env.AI_HORDE_API_KEY?.trim() || '0000000000';
+
+    for (let i = 0; i < count; i++) {
+      const suffix = STYLE_SUFFIXES[style];
+      const variation =
+        count === 2
+          ? i === 0
+            ? 'primary balanced framing and natural composition'
+            : 'distinct alternative framing, angle, and lighting variation'
+          : '';
+      const styledPrompt = [prompt, suffix, variation].filter(Boolean).join(', ');
+      let pushed = false;
+
+      try {
+        const submitController = new AbortController();
+        const submitTimer = setTimeout(() => submitController.abort(), 5000);
+        let jobId = '';
+        try {
+          const submitRes = await fetch('https://aihorde.net/api/v2/generate/async', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              apikey: hordeKey,
+              'Client-Agent': 'ConsulAI:1.0:https://consul-ai.vercel.app',
+            },
+            body: JSON.stringify({
+              prompt: `${styledPrompt}, high quality, detailed`,
+              params: {
+                width: hDim.width,
+                height: hDim.height,
+                steps: 12,
+                n: 1,
+                sampler_name: 'k_euler_a',
+              },
+              nsfw: false,
+              censor_nsfw: true,
+              r2: true,
+            }),
+            signal: submitController.signal,
+          });
+          if (submitRes.ok) {
+            const submitData = (await submitRes.json()) as { id?: string };
+            if (submitData.id) jobId = submitData.id;
+          }
+        } finally {
+          clearTimeout(submitTimer);
+        }
+
+        if (jobId) {
+          const deadline = Date.now() + 18_000;
+          while (Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, 1500));
+            const statusController = new AbortController();
+            const statusTimer = setTimeout(() => statusController.abort(), 4000);
+            try {
+              const stRes = await fetch(
+                `https://aihorde.net/api/v2/generate/status/${encodeURIComponent(jobId)}`,
+                { signal: statusController.signal }
+              );
+              if (!stRes.ok) continue;
+              const stData = (await stRes.json()) as {
+                done?: boolean;
+                faulted?: boolean;
+                generations?: Array<{ img?: string; model?: string }>;
+              };
+              if (stData.faulted) break;
+              if (stData.done && stData.generations?.[0]?.img?.startsWith('https://')) {
+                const imgController = new AbortController();
+                const imgTimer = setTimeout(() => imgController.abort(), 6000);
+                try {
+                  const imgRes = await fetch(stData.generations[0].img, {
+                    signal: imgController.signal,
+                  });
+                  if (imgRes.ok) {
+                    const mime = imgRes.headers.get('content-type') || 'image/webp';
+                    if (mime.startsWith('image/')) {
+                      const b64 = Buffer.from(await imgRes.arrayBuffer()).toString('base64');
+                      images.push({
+                        dataUrl: `data:${mime};base64,${b64}`,
+                        mimeType: mime,
+                        provider: 'aihorde',
+                        model: stData.generations[0].model || 'stable_diffusion_free',
+                        variantIndex: i,
+                      });
+                      pushed = true;
+                    }
+                  }
+                } finally {
+                  clearTimeout(imgTimer);
+                }
+                break;
+              }
+            } finally {
+              clearTimeout(statusTimer);
+            }
+          }
+        }
+      } catch {
+        // Fall through to Gemini SVG artwork
+      }
+
+      if (pushed) continue;
+
+      if (geminiKey && geminiKey !== 'MY_GEMINI_API_KEY') {
+        const svgAi = new GoogleGenAI({
+          apiKey: geminiKey,
+          httpOptions: { timeout: 4500, headers: { 'User-Agent': 'aistudio-build' } },
+        });
+        for (const svgModel of ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-3.6-flash']) {
+          try {
+            const svgResp = await Promise.race([
+              svgAi.models.generateContent({
+                model: svgModel,
+                contents: [
+                  {
+                    role: 'user',
+                    parts: [
+                      {
+                        text: `Create a rich, detailed, visually stunning standalone SVG artwork (${dims.width}x${dims.height} viewBox="0 0 ${dims.width} ${dims.height}") depicting: "${styledPrompt}". Use layered gradients, atmospheric lighting, clean vector silhouettes/shapes, depth, and vibrant composition. Output ONLY raw <svg ...>...</svg> markup with zero markdown fences or explanations.`,
+                      },
+                    ],
+                  },
+                ],
+                config: { maxOutputTokens: 2048, temperature: 0.7 },
+              }),
+              new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 4500)),
+            ]);
+            const raw = (svgResp.text ?? '')
+              .trim()
+              .replace(/^```(?:svg|xml|html)?\s*/i, '')
+              .replace(/\s*```$/i, '')
+              .trim();
+            const start = raw.indexOf('<svg');
+            const end = raw.lastIndexOf('</svg>');
+            if (start !== -1 && end > start) {
+              const svg = raw.slice(start, end + 6);
+              if (!/<script|onload=|onerror=|javascript:/i.test(svg)) {
+                images.push({
+                  dataUrl: `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`,
+                  mimeType: 'image/svg+xml',
+                  provider: 'gemini-vector',
+                  model: svgModel,
+                  variantIndex: i,
+                });
+                pushed = true;
+                break;
+              }
+            }
+          } catch {
+            // Try next fast model
+          }
+        }
+        if (pushed) continue;
+      }
+
+      const escapeXml = (str: string) =>
+        str
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&apos;');
+      const svgFallback = `<svg xmlns="http://www.w3.org/2000/svg" width="${dims.width}" height="${dims.height}" viewBox="0 0 ${dims.width} ${dims.height}">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e1b4b"/>
+      <stop offset="50%" stop-color="#3b0764"/>
+      <stop offset="100%" stop-color="#0f172a"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ec4899" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="#8b5cf6" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="100%" height="100%" fill="url(#bg)"/>
+  <circle cx="${dims.width * 0.5}" cy="${dims.height * 0.5}" r="${Math.min(dims.width, dims.height) * 0.35}" fill="url(#glow)"/>
+  <text x="50%" y="45%" dominant-baseline="middle" text-anchor="middle" fill="#f8fafc" font-family="system-ui, sans-serif" font-size="28" font-weight="700">${escapeXml(prompt.slice(0, 48))}</text>
+  <text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle" fill="#cbd5e1" font-family="system-ui, sans-serif" font-size="15">Style: ${style} · Free Generative Art</text>
+</svg>`;
+      images.push({
+        dataUrl: `data:image/svg+xml;base64,${Buffer.from(svgFallback).toString('base64')}`,
+        mimeType: 'image/svg+xml',
+        provider: 'aihorde-fallback',
+        model: 'stable_diffusion_free',
+        variantIndex: i,
+      });
+    }
+    sendJson(res, 200, {
+      ok: true,
+      provider: images[0]?.provider ?? 'aihorde',
+      model: images[0]?.model ?? 'stable_diffusion_free',
+      images,
+    });
   } catch (err) {
     sendJson(res, 502, {
       code: 'IMAGE_GENERATION_FAILED',

@@ -1,7 +1,6 @@
 import {
   Activity,
   AlertTriangle,
-  AudioLines,
   Download,
   FileText,
   Globe2,
@@ -21,11 +20,10 @@ import {
   getStorageUsageSummary,
   type StorageUsageSummary,
 } from '../lib/indexedDb';
-import { LIVE_VOICE_PERSONAS } from '../lib/models';
+import { FREE_TEXT_MODELS } from '../lib/models';
 import type {
   ApiStatusSnapshot,
   EligibleModel,
-  LiveVoiceName,
   PreferredLanguage,
   ResponseLength,
   ThemeMode,
@@ -47,7 +45,6 @@ interface SettingsModalProps {
   onUpdateResponseLength: (length: ResponseLength) => void;
   onUpdatePreferredLanguage: (language: PreferredLanguage) => void;
   onUpdateModel: (model: EligibleModel) => void;
-  onUpdateLiveVoiceName: (voiceName: LiveVoiceName) => void;
   onUpdateMaxUploadMb: (mb: number) => void;
   onExportJson: () => void;
   onExportTxt: () => void;
@@ -67,7 +64,6 @@ export function SettingsModal({
   onUpdateResponseLength,
   onUpdatePreferredLanguage,
   onUpdateModel,
-  onUpdateLiveVoiceName,
   onUpdateMaxUploadMb,
   onExportJson,
   onExportTxt,
@@ -288,48 +284,26 @@ export function SettingsModal({
             </select>
           </section>
 
-          {/* Model & Voice Configuration */}
-          <section className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <div>
-              <label
-                htmlFor="gemini-model-select"
-                className="block text-sm font-medium text-[#18191B] dark:text-[#ECECEF]"
-              >
-                Text &amp; document model
-              </label>
-              <select
-                id="gemini-model-select"
-                value={settings.model}
-                onChange={(e) => onUpdateModel(e.target.value as EligibleModel)}
-                className="mt-2 h-10 w-full rounded-xl border border-black/[0.12] bg-white px-3 text-xs text-[#18191B] focus:border-[#3D6B58] focus:outline-none dark:border-white/[0.12] dark:bg-[#24262B] dark:text-[#ECECEF] dark:focus:border-[#6BA588]"
-              >
-                <option value="gemini-3.8-flash">gemini-3.8-flash (Default Free Tier)</option>
-                <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite (Fast Free Tier)</option>
-                <option value="gemini-4-hydrogen">gemini-4-hydrogen (Standard)</option>
-              </select>
-            </div>
-
-            <div>
-              <label
-                htmlFor="live-voice-select"
-                className="flex items-center gap-1.5 text-sm font-medium text-[#18191B] dark:text-[#ECECEF]"
-              >
-                <AudioLines className="h-3.5 w-3.5 text-[#3D6B58] dark:text-[#7CC0A3]" aria-hidden="true" />
-                <span>Live voice persona</span>
-              </label>
-              <select
-                id="live-voice-select"
-                value={settings.liveVoiceName ?? 'Zephyr'}
-                onChange={(e) => onUpdateLiveVoiceName(e.target.value as LiveVoiceName)}
-                className="mt-2 h-10 w-full rounded-xl border border-black/[0.12] bg-white px-3 text-xs text-[#18191B] focus:border-[#3D6B58] focus:outline-none dark:border-white/[0.12] dark:bg-[#24262B] dark:text-[#ECECEF] dark:focus:border-[#6BA588]"
-              >
-                {LIVE_VOICE_PERSONAS.map((p) => (
-                  <option key={p.voiceName} value={p.voiceName}>
-                    {p.label}
-                  </option>
-                ))}
-              </select>
-            </div>
+          {/* Model Configuration */}
+          <section>
+            <label
+              htmlFor="gemini-model-select"
+              className="block text-sm font-medium text-[#18191B] dark:text-[#ECECEF]"
+            >
+              Text &amp; document model
+            </label>
+            <select
+              id="gemini-model-select"
+              value={settings.model}
+              onChange={(e) => onUpdateModel(e.target.value as EligibleModel)}
+              className="mt-2 h-10 w-full rounded-xl border border-black/[0.12] bg-white px-3 text-xs text-[#18191B] focus:border-[#3D6B58] focus:outline-none dark:border-white/[0.12] dark:bg-[#24262B] dark:text-[#ECECEF] dark:focus:border-[#6BA588]"
+            >
+              {FREE_TEXT_MODELS.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label} ({m.description})
+                </option>
+              ))}
+            </select>
           </section>
 
           {/* Local Upload Size Cap */}
@@ -398,14 +372,6 @@ export function SettingsModal({
                 <dt>Active text model:</dt>
                 <dd className="font-mono-code font-medium text-[#18191B] dark:text-[#ECECEF]">
                   {settings.model || apiStatus?.defaultModel || 'gemini-3.8-flash'}
-                </dd>
-              </div>
-              <div className="flex items-center justify-between gap-2">
-                <dt>Live voice:</dt>
-                <dd className="font-mono-code font-medium text-[#18191B] dark:text-[#ECECEF]">
-                  {apiStatus?.liveAvailable
-                    ? `${apiStatus.liveModel} (${apiStatus.liveTransport})`
-                    : 'Unavailable (key required)'}
                 </dd>
               </div>
               <div className="flex items-center justify-between gap-2">

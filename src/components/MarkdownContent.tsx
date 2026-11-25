@@ -1,3 +1,4 @@
+import { Download } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { detectTextDirection } from '../lib/language';
@@ -17,6 +18,34 @@ function isSafeHref(href?: string): boolean {
   );
 }
 
+function isSafeImageSrc(src?: string): boolean {
+  if (!src) return false;
+  const trimmed = src.trim();
+  const lower = trimmed.toLowerCase();
+  if (lower.startsWith('http://') || lower.startsWith('https://')) {
+    return true;
+  }
+  return /^data:image\/(png|jpeg|jpg|webp|gif|svg\+xml)(?:;charset=[^;,]+)?;base64,[a-z0-9+/=\s]+$/i.test(
+    trimmed
+  );
+}
+
+function safeUrlTransform(url: string): string {
+  if (isSafeHref(url) || isSafeImageSrc(url)) {
+    return url;
+  }
+  return '';
+}
+
+function getImageExtension(src: string): string {
+  const match = src.match(/^data:image\/([a-z0-9+]+)[;,]/i);
+  if (!match) return 'png';
+  const sub = match[1].toLowerCase();
+  if (sub === 'jpeg') return 'jpg';
+  if (sub === 'svg+xml') return 'svg';
+  return sub;
+}
+
 export function MarkdownContent({ content }: MarkdownContentProps) {
   const dir = detectTextDirection(content);
 
@@ -27,6 +56,7 @@ export function MarkdownContent({ content }: MarkdownContentProps) {
     >
       <Markdown
         remarkPlugins={[remarkGfm]}
+        urlTransform={safeUrlTransform}
         components={{
           h1: ({ children }) => (
             <h1 className="font-display mt-6 mb-3 text-xl font-semibold tracking-tight text-[#18191B] dark:text-white first:mt-0">
@@ -96,19 +126,25 @@ export function MarkdownContent({ content }: MarkdownContentProps) {
               <span>{children}</span>
             ),
           img: ({ src, alt }) =>
-            isSafeHref(src) ? (
+            isSafeImageSrc(src) && src ? (
               <span className="my-4 block overflow-hidden rounded-2xl border border-black/[0.08] bg-black/[0.03] shadow-md dark:border-white/[0.09] dark:bg-white/[0.03]">
                 <img
                   src={src}
                   alt={alt || 'Generated Image'}
                   loading="lazy"
-                  className="max-h-[500px] w-full object-cover transition-transform hover:scale-[1.01]"
+                  className="max-h-[500px] w-full object-cover"
                 />
-                {alt && (
-                  <span className="block px-3.5 py-2 text-xs font-medium text-[#5C6066] dark:text-[#9CA1A8]">
-                    {alt}
-                  </span>
-                )}
+                <span className="flex items-center justify-between gap-2 px-3.5 py-2 text-xs text-[#5C6066] dark:text-[#9CA1A8]">
+                  <span className="truncate font-medium">{alt || 'Generated image'}</span>
+                  <a
+                    href={src}
+                    download={`consul-ai-image.${getImageExtension(src)}`}
+                    className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-black/[0.1] bg-white px-2.5 py-1 text-[11px] font-medium text-[#18191B] transition-colors hover:bg-black/[0.04] dark:border-white/[0.1] dark:bg-[#24262B] dark:text-[#ECECEF] dark:hover:bg-white/[0.08]"
+                  >
+                    <Download className="h-3 w-3" aria-hidden="true" />
+                    <span>Download</span>
+                  </a>
+                </span>
               </span>
             ) : null,
           code: ({ className, children, ...props }) => {

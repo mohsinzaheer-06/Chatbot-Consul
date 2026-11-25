@@ -7,22 +7,21 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer as createViteServer } from 'vite';
 import { ELIGIBLE_MODELS, resolveEligibleModel, validateChatRequest } from './src/lib/chatValidation';
-import { buildLiveVoiceSystemInstruction, resolveLiveModel } from './src/lib/models';
 import { createStreamAccumulator } from './src/lib/streamParser';
 import {
   extractGroundingSourcesFromChunk,
   generateChatStream,
   generateFollowUpsFallback,
-  getGeminiClient,
   isApiKeyConfigured,
   mapGeminiError,
 } from './server/gemini';
 import {
+  detectImageIntent,
   generateImagesWithProvider,
   getImageProviderAvailability,
+  inferImageAspectRatio,
   validateImageGenerationRequest,
 } from './server/imageProvider';
-import { attachLiveVoiceWebSocket } from './server/liveWs';
 import { resolveUserLocationContext } from './server/location';
 import type { ApiStatusSnapshot, GroundingSource } from './src/types/chat';
 
@@ -64,7 +63,6 @@ async function startServer() {
 
   app.get('/api/health', (_req: Request, res: Response) => {
     const configured = isApiKeyConfigured();
-    const liveModel = resolveLiveModel(process.env.GEMINI_LIVE_MODEL);
     const imageStatus = getImageProviderAvailability();
 
     const snapshot: ApiStatusSnapshot = {
@@ -73,12 +71,10 @@ async function startServer() {
       nodeVersion: process.version,
       defaultModel: resolveEligibleModel(undefined, process.env.GEMINI_MODEL),
       eligibleModels: [...ELIGIBLE_MODELS],
-      liveModel,
-      liveAvailable: configured && Boolean(liveModel),
-      liveTransport: configured ? 'ws-bridge+ephemeral' : 'unavailable',
-      liveUnavailableReason: configured
-        ? undefined
-        : 'GEMINI_API_KEY is not configured on the server.',
+      liveModel: '',
+      liveAvailable: false,
+      liveTransport: 'unavailable',
+      liveUnavailableReason: 'Live voice is disabled.',
       imageModel: imageStatus.model,
       imageProvider: imageStatus.provider,
       imageAvailable: imageStatus.available,
@@ -91,54 +87,6 @@ async function startServer() {
     };
 
     res.json(snapshot);
-  });
-
-  app.post('/api/live-token', async (req: Request, res: Response) => {
-    if (!isApiKeyConfigured()) {
-      res.status(503).json({
-        available: false,
-        code: 'MISSING_API_KEY',
-        message: 'Gemini API key is not configured on the server.',
-      });
-      return;
-    }
-
-    const body = (req.body ?? {}) as { voiceName?: unknown; preferredLanguage?: unknown };
-    const voiceName = body.voiceName === 'Kore' ? 'Kore' : 'Zephyr';
-    const preferredLanguage = typeof body.preferredLanguage === 'string' ? body.preferredLanguage : 'auto';
-    const liveModel = resolveLiveModel(process.env.GEMINI_LIVE_MODEL);
-    const systemInstruction = buildLiveVoiceSystemInstruction(preferredLanguage);
-
-    try {
-      const ai = getGeminiClient('v1alpha');
-      const expireTime = new Date(Date.now() + 10 * 60_000).toISOString();
-      const token = await ai.authTokens.create({
-        config: {
-          uses: 1,
-          expireTime,
-        },
-      });
-      if (!token?.name) {
-        throw new Error('EPHEMERAL_TOKEN_UNSUPPORTED');
-      }
-      res.json({
-        available: true,
-        token: token.name,
-        model: liveModel,
-        voiceName,
-        systemInstruction,
-        wsUrl: `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained?access_token=${encodeURIComponent(
-          token.name
-        )}`,
-      });
-    } catch (err) {
-      const mapped = mapGeminiError(err);
-      res.status(mapped.status).json({
-        available: false,
-        code: mapped.code,
-        message: mapped.message,
-      });
-    }
   });
 
   app.post('/api/image', async (req: Request, res: Response) => {
@@ -226,6 +174,45 @@ async function startServer() {
         locationLabel: locationParts.length > 0 ? locationParts.join(', ') : undefined,
       });
 
+      const hasAttachments = Boolean(
+        validation.data.attachments && validation.data.attachments.length > 0
+      );
+      if (!hasAttachments && detectImageIntent(validation.data.message)) {
+        try {
+          const aspectRatio = inferImageAspectRatio(validation.data.message);
+          const imageRes = await generateImagesWithProvider({
+            prompt: validation.data.message,
+            style: 'none',
+            aspectRatio,
+            count: 1,
+          });
+          if (imageRes.ok && imageRes.images.length > 0) {
+            const img = imageRes.images[0];
+            const safeAlt = validation.data.message.replace(/[\[\]()\r\n]/g, ' ').trim().slice(0, 80);
+            writeSseEvent(res, { type: 'meta', model: imageRes.model || 'flux-free' });
+            writeSseEvent(res, {
+              type: 'delta',
+              text: `Here is your generated image (${aspectRatio}):\n\n![${safeAlt || 'Generated image'}](${img.dataUrl})`,
+            });
+            writeSseEvent(res, {
+              type: 'followups',
+              questions: [
+                'Create a slightly different variation of this image',
+                'Make it in a cinematic or photorealistic style',
+                'Adjust the aspect ratio or lighting',
+              ],
+            });
+            writeSseEvent(res, { type: 'done' });
+            if (!res.writableEnded) {
+              res.end();
+            }
+            return;
+          }
+        } catch {
+          // Fall back to text chat if image generation fails
+        }
+      }
+
       const { stream, model, fallbackSources } = await generateChatStream({
         message: validation.data.message,
         history: validation.data.history,
@@ -271,7 +258,12 @@ async function startServer() {
         }
 
         let followUps = finalized.followUps;
-        if (followUps.length === 0 && finalized.fullAnswer.length > 0) {
+        if (
+          followUps.length === 0 &&
+          finalized.fullAnswer.length > 0 &&
+          validation.data.responseLength !== 'quick' &&
+          validation.data.responseLength !== 'concise'
+        ) {
           followUps = await generateFollowUpsFallback({
             userMessage: validation.data.message,
             assistantAnswer: finalized.fullAnswer,
@@ -316,7 +308,6 @@ async function startServer() {
   }
 
   const httpServer = http.createServer(app);
-  attachLiveVoiceWebSocket(httpServer);
 
   httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`Consul AI server listening on http://0.0.0.0:${PORT}`);

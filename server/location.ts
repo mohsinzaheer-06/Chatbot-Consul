@@ -12,7 +12,7 @@ interface CachedGeo {
 
 const GEO_CACHE_TTL_MS = 15 * 60 * 1000;
 const GEO_CACHE_MAX_SIZE = 500;
-const GEO_FETCH_TIMEOUT_MS = 850;
+const GEO_FETCH_TIMEOUT_MS = 350;
 const geoCache = new Map<string, CachedGeo>();
 
 type HeaderBag =

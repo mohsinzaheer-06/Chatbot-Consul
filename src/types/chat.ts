@@ -5,8 +5,9 @@ export type ResponseLength = 'quick' | 'balanced' | 'detailed' | 'concise';
 export type PreferredLanguage = 'auto' | 'en' | 'ur' | 'roman-ur';
 
 export type EligibleModel =
-  | 'gemini-3.8-flash'
   | 'gemini-3.1-flash-lite'
+  | 'gemini-3.5-flash-lite'
+  | 'gemini-3.8-flash'
   | 'gemini-4-hydrogen'
   | (string & {});
 
@@ -147,7 +148,7 @@ export interface ApiStatusSnapshot {
   liveTransport: 'ws-bridge+ephemeral' | 'ephemeral-only' | 'unavailable';
   liveUnavailableReason?: string;
   imageModel?: string;
-  imageProvider: 'none' | 'gemini' | 'huggingface' | 'pollinations';
+  imageProvider: 'none' | 'gemini' | 'huggingface' | 'aihorde';
   imageAvailable: boolean;
   imageUnavailableReason?: string;
   freeOnlyPolicy: boolean;

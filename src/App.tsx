@@ -13,7 +13,6 @@ import {
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { ChatInput } from './components/ChatInput';
-import { LiveVoiceModal } from './components/LiveVoiceModal';
 import { MessageBubble } from './components/MessageBubble';
 import { SettingsModal } from './components/SettingsModal';
 import { Sidebar } from './components/Sidebar';
@@ -39,7 +38,6 @@ export default function App() {
     updateResponseLength,
     updatePreferredLanguage,
     updateModel,
-    updateLiveVoiceName,
     updateMaxUploadMb,
     createNewChat,
     selectConversation,
@@ -54,7 +52,6 @@ export default function App() {
     stopGeneration,
     regenerateLastResponse,
     retryLastError,
-    saveVoiceTranscriptToChat,
     exportJson,
     exportTxt,
     importJson,
@@ -65,7 +62,6 @@ export default function App() {
   const [isDesktopSidebarOpen, setIsDesktopSidebarOpen] = useState(true);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [isLiveVoiceOpen, setIsLiveVoiceOpen] = useState(false);
   const [isSelectionMode, setIsSelectionMode] = useState(false);
   const [selectedMessageIds, setSelectedMessageIds] = useState<string[]>([]);
   const [confirmClearChat, setConfirmClearChat] = useState(false);
@@ -87,8 +83,11 @@ export default function App() {
   }, [activeConversationId]);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-  }, [messages.length, messages[messages.length - 1]?.content]);
+    messagesEndRef.current?.scrollIntoView({
+      behavior: isGenerating ? 'auto' : 'smooth',
+      block: 'end',
+    });
+  }, [messages.length, messages[messages.length - 1]?.content, isGenerating]);
 
   const toggleMessageSelection = (messageId: string) => {
     setSelectedMessageIds((prev) =>
@@ -367,19 +366,8 @@ export default function App() {
           maxUploadMb={settings.maxUploadMb}
           onSend={sendMessage}
           onStop={stopGeneration}
-          onOpenLiveVoice={() => setIsLiveVoiceOpen(true)}
         />
       </div>
-
-      <LiveVoiceModal
-        isOpen={isLiveVoiceOpen}
-        voiceName={settings.liveVoiceName ?? 'Zephyr'}
-        preferredLanguage={settings.preferredLanguage}
-        apiStatus={apiStatus}
-        onChangeVoiceName={updateLiveVoiceName}
-        onSaveTranscript={saveVoiceTranscriptToChat}
-        onClose={() => setIsLiveVoiceOpen(false)}
-      />
 
       <SettingsModal
         isOpen={isSettingsOpen}
@@ -393,7 +381,6 @@ export default function App() {
         onUpdateResponseLength={updateResponseLength}
         onUpdatePreferredLanguage={updatePreferredLanguage}
         onUpdateModel={updateModel}
-        onUpdateLiveVoiceName={updateLiveVoiceName}
         onUpdateMaxUploadMb={updateMaxUploadMb}
         onExportJson={exportJson}
         onExportTxt={exportTxt}

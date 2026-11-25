@@ -1,6 +1,6 @@
 import type { GroundingSource, UserLocationContext } from '../src/types/chat';
 
-const WEB_FETCH_TIMEOUT_MS = 1400;
+const WEB_FETCH_TIMEOUT_MS = 900;
 
 async function fetchJsonWithTimeout(
   url: string,

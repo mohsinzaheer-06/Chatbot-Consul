@@ -2,7 +2,6 @@
 import {
   AlertCircle,
   ArrowUp,
-  AudioLines,
   FileSpreadsheet,
   FileText,
   Image as ImageIcon,
@@ -33,7 +32,6 @@ interface ChatInputProps {
   maxUploadMb?: number;
   onSend: (text: string, attachments?: MessageAttachment[]) => void;
   onStop: () => void;
-  onOpenLiveVoice: () => void;
 }
 
 interface SpeechRecognitionInstance {
@@ -60,7 +58,6 @@ export function ChatInput({
   maxUploadMb = DEFAULT_UPLOAD_LIMITS.defaultMaxFileMb,
   onSend,
   onStop,
-  onOpenLiveVoice,
 }: ChatInputProps) {
   const [value, setValue] = useState('');
   const [attachments, setAttachments] = useState<MessageAttachment[]>([]);
@@ -186,9 +183,7 @@ export function ChatInput({
     };
     const SpeechRec = w.SpeechRecognition || w.webkitSpeechRecognition;
     if (!SpeechRec) {
-      setComposerNotice(
-        'Browser speech dictation is unavailable here. Use Live Voice for real-time voice chat.'
-      );
+      setComposerNotice('Browser speech dictation is unavailable in this browser.');
       return;
     }
 
@@ -417,16 +412,7 @@ export function ChatInput({
                 </button>
               )}
 
-              <button
-                type="button"
-                onClick={onOpenLiveVoice}
-                aria-label="Start live voice conversation"
-                title="Live voice conversation"
-                className="inline-flex h-9 items-center gap-1.5 rounded-full border border-black/[0.09] bg-[#FAF9F6] px-3 text-xs font-medium text-[#18191B] transition-colors hover:border-[#3D6B58]/40 hover:bg-white dark:border-white/[0.1] dark:bg-[#131416] dark:text-[#ECECEF] dark:hover:border-[#6BA588]/50 whitespace-nowrap"
-              >
-                <AudioLines className="h-3.5 w-3.5 text-[#3D6B58] dark:text-[#7CC0A3]" aria-hidden="true" />
-                <span className="hidden sm:inline">Live voice</span>
-              </button>
+
 
               {isGenerating ? (
                 <button

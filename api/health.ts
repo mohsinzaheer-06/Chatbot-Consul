@@ -1,8 +1,13 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
-const DEFAULT_MODEL = 'gemini-3.8-flash';
+const DEFAULT_MODEL = 'gemini-3.1-flash-lite';
 const DEFAULT_LIVE_MODEL = 'gemini-3.8-live';
-const ELIGIBLE_MODELS = ['gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-4-hydrogen'];
+const ELIGIBLE_MODELS = [
+  'gemini-3.1-flash-lite',
+  'gemini-3.5-flash-lite',
+  'gemini-3.8-flash',
+  'gemini-4-hydrogen',
+];
 const PAID_GEMINI_IMAGE_MODELS = new Set([
   'gemini-3.1-flash-lite-image',
   'gemini-nano-banana-2.1',
@@ -39,8 +44,8 @@ export default async function handler(
   const hfModel = process.env.HF_IMAGE_MODEL?.trim() || 'black-forest-labs/FLUX.1-schnell';
   const configuredImg = process.env.GEMINI_IMAGE_MODEL?.trim();
 
-  let imageProvider: 'none' | 'gemini' | 'huggingface' | 'pollinations' = 'pollinations';
-  let imageModel: string | undefined = 'flux-free';
+  let imageProvider: 'none' | 'gemini' | 'huggingface' | 'aihorde' = 'aihorde';
+  let imageModel: string | undefined = 'stable_diffusion_free';
   let imageAvailable = true;
   let imageUnavailableReason: string | undefined = undefined;
 
@@ -71,12 +76,10 @@ export default async function handler(
       nodeVersion: process.version,
       defaultModel: resolveDefaultModel(process.env.GEMINI_MODEL),
       eligibleModels: ELIGIBLE_MODELS,
-      liveModel,
-      liveAvailable: configured && Boolean(liveModel),
-      liveTransport: configured ? 'ephemeral-only' : 'unavailable',
-      liveUnavailableReason: configured
-        ? undefined
-        : 'GEMINI_API_KEY is not configured on the server.',
+      liveModel: '',
+      liveAvailable: false,
+      liveTransport: 'unavailable',
+      liveUnavailableReason: 'Live voice is disabled.',
       imageModel,
       imageProvider,
       imageAvailable,

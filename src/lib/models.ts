@@ -6,14 +6,19 @@ export const FREE_TEXT_MODELS: readonly {
   description: string;
 }[] = [
   {
-    id: 'gemini-3.8-flash',
-    label: 'gemini-3.8-flash',
-    description: 'Default free-tier multimodal model',
-  },
-  {
     id: 'gemini-3.1-flash-lite',
     label: 'gemini-3.1-flash-lite',
+    description: 'Fastest Free Tier (Recommended)',
+  },
+  {
+    id: 'gemini-3.5-flash-lite',
+    label: 'gemini-3.5-flash-lite',
     description: 'Fast lightweight free-tier model',
+  },
+  {
+    id: 'gemini-3.8-flash',
+    label: 'gemini-3.8-flash',
+    description: 'Latest multimodal flash model',
   },
   {
     id: 'gemini-4-hydrogen',
@@ -22,8 +27,21 @@ export const FREE_TEXT_MODELS: readonly {
   },
 ];
 
-export const DEFAULT_TEXT_MODEL: EligibleModel = 'gemini-3.8-flash';
+export const DEFAULT_TEXT_MODEL: EligibleModel = 'gemini-3.1-flash-lite';
 export const DEFAULT_LIVE_MODEL = 'gemini-3.8-live';
+
+export function getResponseGenerationConfig(responseLength: string): {
+  maxOutputTokens: number;
+  temperature: number;
+} {
+  if (responseLength === 'quick' || responseLength === 'concise') {
+    return { maxOutputTokens: 768, temperature: 0.45 };
+  }
+  if (responseLength === 'detailed') {
+    return { maxOutputTokens: 4096, temperature: 0.7 };
+  }
+  return { maxOutputTokens: 1792, temperature: 0.6 };
+}
 
 export const IMAGE_UNAVAILABLE_MESSAGE =
   'Image generation is currently unavailable because no eligible free image-generation provider is configured. No paid API will be used.';

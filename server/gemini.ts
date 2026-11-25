@@ -4,6 +4,7 @@ import {
   formatAttachmentsForPrompt,
   resolveEligibleModel,
 } from '../src/lib/chatValidation';
+import { getResponseGenerationConfig } from '../src/lib/models';
 import { fetchLiveWebFallback, needsLiveWebSearch } from './webFallback';
 import type {
   ChatHistoryTurn,
@@ -357,8 +358,10 @@ export async function generateChatStream(params: {
   const candidateModels = Array.from(
     new Set<string>([
       primaryModel,
-      'gemini-3.8-flash',
       'gemini-3.1-flash-lite',
+      'gemini-3.5-flash-lite',
+      'gemini-3.6-flash',
+      'gemini-3.8-flash',
       'gemini-4-hydrogen',
     ])
   );
@@ -369,6 +372,7 @@ export async function generateChatStream(params: {
   );
   const priorHistory = allContents.slice(0, -1);
   const latestParts = buildUserMessageParts(params.message, params.attachments);
+  const genSettings = getResponseGenerationConfig(params.responseLength);
 
   let cachedFallbackWeb: { webSnippet?: string; sources: GroundingSource[] } | null = null;
   const getFallbackWeb = async () => {
@@ -393,11 +397,14 @@ export async function generateChatStream(params: {
     const config = targetModel.startsWith('gemini-4-')
       ? {
           systemInstruction,
+          maxOutputTokens: genSettings.maxOutputTokens,
           thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
           ...toolsConfig,
         }
       : {
           systemInstruction,
+          maxOutputTokens: genSettings.maxOutputTokens,
+          temperature: genSettings.temperature,
           ...toolsConfig,
         };
 
@@ -455,7 +462,7 @@ export async function generateChatStream(params: {
       continue;
     }
 
-    const timeoutMs = attempt.model === 'gemini-3.8-flash' ? 8500 : attempt.search ? 12_000 : 20_000;
+    const timeoutMs = attempt.search ? 6500 : 4500;
     try {
       return await withAttemptTimeout(
         openStreamForModel(attempt.model, attempt.search),
@@ -469,6 +476,9 @@ export async function generateChatStream(params: {
       }
 
       const mapped = mapGeminiError(err);
+      const rawErrMsg = err instanceof Error ? err.message : String(err ?? '');
+      const isOverloaded503 =
+        /\b503\b|UNAVAILABLE|high demand/i.test(rawErrMsg);
 
       if (mapped.code === 'API_KEY_INVALID' || mapped.code === 'MISSING_API_KEY') {
         throw err;
@@ -479,12 +489,18 @@ export async function generateChatStream(params: {
         continue;
       }
 
+      if (isOverloaded503) {
+        modelNotFoundCooldownUntil.set(attempt.model, Date.now() + 45_000);
+        skippedThisRequest.add(attempt.model);
+        continue;
+      }
+
       if (mapped.code === 'UPSTREAM_TIMEOUT') {
-        if (attempt.model === 'gemini-3.8-flash') {
-          modelNotFoundCooldownUntil.set(attempt.model, Date.now() + 60_000);
-          skippedThisRequest.add(attempt.model);
-        } else if (attempt.search) {
+        if (attempt.search) {
           searchCooldownUntil.set(attempt.model, Date.now() + SEARCH_COOLDOWN_MS);
+        } else {
+          modelNotFoundCooldownUntil.set(attempt.model, Date.now() + 45_000);
+          skippedThisRequest.add(attempt.model);
         }
         continue;
       }
@@ -499,12 +515,13 @@ export async function generateChatStream(params: {
         continue;
       }
 
-      if (mapped.code === 'QUOTA_EXHAUSTED') {
+      if (mapped.code === 'QUOTA_EXHAUSTED' || mapped.code === 'BAD_REQUEST') {
+        skippedThisRequest.add(attempt.model);
         continue;
       }
 
       if (mapped.code === 'RATE_LIMIT_EXCEEDED' || mapped.retryable) {
-        const delayMs = mapped.retryAfterMs ?? 500;
+        const delayMs = mapped.retryAfterMs ?? 300;
         await sleepWithSignal(delayMs, params.signal);
         try {
           return await withAttemptTimeout(
@@ -539,33 +556,44 @@ export async function generateFollowUpsFallback(params: {
     const model = resolveEligibleModel(params.requestedModel, process.env.GEMINI_MODEL);
     const { Type } = await import('@google/genai');
 
-    const response = await ai.models.generateContent({
-      model,
-      contents: `User message: ${params.userMessage}\n\nAssistant answer: ${params.assistantAnswer}\n\nGenerate exactly 3 short, practical, non-generic follow-up questions directly related to this conversation, in the exact same language and script (English, Urdu script, or Roman Urdu) as the assistant answer. Avoid questions already answered.`,
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            followUps: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
+    const timeoutController = new AbortController();
+    const timer = setTimeout(() => timeoutController.abort(), 1800);
+    try {
+      const response = await withAttemptTimeout(
+        ai.models.generateContent({
+          model,
+          contents: `User message: ${params.userMessage}\n\nAssistant answer: ${params.assistantAnswer}\n\nGenerate exactly 3 short, practical, non-generic follow-up questions directly related to this conversation, in the exact same language and script (English, Urdu script, or Roman Urdu) as the assistant answer. Avoid questions already answered.`,
+          config: {
+            maxOutputTokens: 220,
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                followUps: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                },
+              },
+              required: ['followUps'],
             },
+            ...(model.startsWith('gemini-4-')
+              ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+              : {}),
           },
-          required: ['followUps'],
-        },
-        ...(model.startsWith('gemini-4-')
-          ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
-          : {}),
-      },
-    });
+        }),
+        1800,
+        timeoutController.signal
+      );
 
-    const parsed = JSON.parse((response.text ?? '{}').trim()) as { followUps?: unknown };
-    if (Array.isArray(parsed.followUps)) {
-      return parsed.followUps
-        .filter((q): q is string => typeof q === 'string' && q.trim().length >= 2)
-        .map((q) => q.trim())
-        .slice(0, 3);
+      const parsed = JSON.parse((response.text ?? '{}').trim()) as { followUps?: unknown };
+      if (Array.isArray(parsed.followUps)) {
+        return parsed.followUps
+          .filter((q): q is string => typeof q === 'string' && q.trim().length >= 2)
+          .map((q) => q.trim())
+          .slice(0, 3);
+      }
+    } finally {
+      clearTimeout(timer);
     }
   } catch {
     // Do not fail the main response if fallback follow-up call hits transient error
