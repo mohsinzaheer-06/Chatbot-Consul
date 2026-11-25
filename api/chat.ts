@@ -172,11 +172,35 @@ function inferImageAspectRatio(message: string): ImageAspectRatio {
   return '1:1';
 }
 
+function cleanImagePrompt(rawPrompt: string): string {
+  const cleaned = rawPrompt
+    .trim()
+    .replace(
+      /^(?:please\s+)?(?:can you\s+|could you\s+|help me\s+|i want you to\s+|i need you to\s+)?(?:generat\w*|creat\w*|make|draw|paint|render|illustrat\w*|design)(?:\s+me)?\s+(?:an?\s+)?(?:(?:image|picture|pic|photo|artwork|illustration)\s+of\s+)?/i,
+      ''
+    )
+    .replace(/\b(?:as my|for my|as a|for a)\s+(?:desktop|laptop|phone|mobile)\s*(?:wallpaper|background)?\b/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned.length >= 3 ? cleaned : rawPrompt.trim();
+}
+
+const AI_HORDE_FAST_MODELS = [
+  'stable_diffusion',
+  'DreamShaper',
+  'AbsoluteReality',
+  'Deliberate',
+  'Realistic Vision',
+  'Epic Diffusion',
+  'Analog Diffusion',
+];
+
 async function generateFreeChatImage(
-  prompt: string,
+  rawPrompt: string,
   aspectRatio: ImageAspectRatio,
   geminiKey: string
 ): Promise<{ dataUrl: string; model: string }> {
+  const prompt = cleanImagePrompt(rawPrompt);
   const dims = ASPECT_RATIO_DIMENSIONS[aspectRatio];
   const hfToken = process.env.HF_API_TOKEN?.trim();
   const hfModel = process.env.HF_IMAGE_MODEL?.trim() || 'black-forest-labs/FLUX.1-schnell';
@@ -240,7 +264,7 @@ async function generateFreeChatImage(
         }
       }
     } catch {
-      // Fall through to Pollinations
+      // Fall through to AI Horde
     }
   }
 
@@ -266,10 +290,11 @@ async function generateFreeChatImage(
       },
       body: JSON.stringify({
         prompt: `${prompt}, high quality, detailed`,
+        models: AI_HORDE_FAST_MODELS,
         params: {
           width: hDims.width,
           height: hDims.height,
-          steps: 12,
+          steps: 14,
           n: 1,
           sampler_name: 'k_euler_a',
         },
@@ -290,9 +315,9 @@ async function generateFreeChatImage(
   }
 
   if (jobId) {
-    const deadline = Date.now() + 18_000;
+    const deadline = Date.now() + 32_000;
     while (Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 1500));
+      await new Promise((r) => setTimeout(r, 1200));
       const statusController = new AbortController();
       const statusTimer = setTimeout(() => statusController.abort(), 4000);
       try {
@@ -311,7 +336,7 @@ async function generateFreeChatImage(
           const imgUrl = statusData.generations[0].img;
           if (imgUrl.startsWith('https://')) {
             const imgController = new AbortController();
-            const imgTimer = setTimeout(() => imgController.abort(), 6000);
+            const imgTimer = setTimeout(() => imgController.abort(), 7000);
             try {
               const imgRes = await fetch(imgUrl, { signal: imgController.signal });
               if (imgRes.ok) {
@@ -340,7 +365,7 @@ async function generateFreeChatImage(
 
   const svgAi = new GoogleGenAI({
     apiKey: geminiKey,
-    httpOptions: { timeout: 4500, headers: { 'User-Agent': 'aistudio-build' } },
+    httpOptions: { timeout: 10_000, headers: { 'User-Agent': 'aistudio-build' } },
   });
   for (const svgModel of ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-3.6-flash']) {
     try {
@@ -352,14 +377,14 @@ async function generateFreeChatImage(
               role: 'user',
               parts: [
                 {
-                  text: `Create a rich, detailed, visually stunning standalone SVG artwork (${dims.width}x${dims.height} viewBox="0 0 ${dims.width} ${dims.height}") depicting: "${prompt}". Use layered gradients, atmospheric lighting, clean vector silhouettes/shapes, depth, and vibrant composition. Output ONLY raw <svg ...>...</svg> markup with zero markdown fences or explanations.`,
+                  text: `Create a rich, detailed, visually stunning standalone SVG illustration (${dims.width}x${dims.height} viewBox="0 0 ${dims.width} ${dims.height}") depicting: "${prompt}". Use layered gradients, atmospheric lighting, clean vector silhouettes and shapes, depth, and vibrant colors. Strictly NO <text> elements, NO words, NO labels, NO titles anywhere inside the SVG. Output ONLY raw <svg ...>...</svg> markup with zero markdown fences.`,
                 },
               ],
             },
           ],
-          config: { maxOutputTokens: 2048, temperature: 0.7 },
+          config: { maxOutputTokens: 3072, temperature: 0.7 },
         }),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 4500)),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 10_000)),
       ]);
       const raw = (svgResp.text ?? '')
         .trim()
@@ -370,7 +395,7 @@ async function generateFreeChatImage(
       const end = raw.lastIndexOf('</svg>');
       if (start !== -1 && end > start) {
         const svg = raw.slice(start, end + 6);
-        if (!/<script|onload=|onerror=|javascript:/i.test(svg)) {
+        if (!/<text\b|<script|onload=|onerror=|javascript:/i.test(svg)) {
           return {
             dataUrl: `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`,
             model: svgModel,
@@ -382,35 +407,7 @@ async function generateFreeChatImage(
     }
   }
 
-  const escapeXml = (str: string) =>
-    str
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&apos;');
-
-  const svgFallback = `<svg xmlns="http://www.w3.org/2000/svg" width="${dims.width}" height="${dims.height}" viewBox="0 0 ${dims.width} ${dims.height}">
-  <defs>
-    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#1e1b4b"/>
-      <stop offset="50%" stop-color="#3b0764"/>
-      <stop offset="100%" stop-color="#0f172a"/>
-    </linearGradient>
-    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
-      <stop offset="0%" stop-color="#ec4899" stop-opacity="0.6"/>
-      <stop offset="100%" stop-color="#8b5cf6" stop-opacity="0"/>
-    </radialGradient>
-  </defs>
-  <rect width="100%" height="100%" fill="url(#bg)"/>
-  <circle cx="${dims.width * 0.5}" cy="${dims.height * 0.5}" r="${Math.min(dims.width, dims.height) * 0.35}" fill="url(#glow)"/>
-  <text x="50%" y="45%" dominant-baseline="middle" text-anchor="middle" fill="#f8fafc" font-family="system-ui, sans-serif" font-size="28" font-weight="700">${escapeXml(prompt.slice(0, 48))}</text>
-  <text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle" fill="#cbd5e1" font-family="system-ui, sans-serif" font-size="15">Consul AI · Free Generative Art (${aspectRatio})</text>
-</svg>`;
-  return {
-    dataUrl: `data:image/svg+xml;base64,${Buffer.from(svgFallback).toString('base64')}`,
-    model: 'stable_diffusion_free',
-  };
+  throw new Error('IMAGE_GENERATION_BUSY');
 }
 
 async function readRequestJson(
@@ -1319,6 +1316,14 @@ function mapError(err: unknown): {
       retryable: true,
     };
   }
+  if (rawMessage === 'IMAGE_GENERATION_BUSY') {
+    return {
+      status: 503,
+      code: 'IMAGE_GENERATION_BUSY',
+      message: 'The free image generator is busy right now. Please click Retry to try again.',
+      retryable: true,
+    };
+  }
   if (numericStatus === 429 || /RESOURCE_EXHAUSTED|quota|rate limit|too many requests/i.test(rawMessage)) {
     const isHardQuota = /limit:\s*0|billing|exceeded your current quota|daily quota/i.test(rawMessage);
     if (isHardQuota) {
@@ -1519,33 +1524,29 @@ export default async function handler(
         validation.data.attachments && validation.data.attachments.length > 0
       );
       if (!hasAttachments && detectImageIntent(validation.data.message)) {
-        try {
-          const aspectRatio = inferImageAspectRatio(validation.data.message);
-          const generated = await generateFreeChatImage(
-            validation.data.message,
-            aspectRatio,
-            apiKey
-          );
-          const safeAlt = validation.data.message.replace(/[\[\]()\r\n]/g, ' ').trim().slice(0, 80);
-          writeSseEvent(res, { type: 'meta', model: generated.model });
-          writeSseEvent(res, {
-            type: 'delta',
-            text: `Here is your generated image (${aspectRatio}):\n\n![${safeAlt || 'Generated image'}](${generated.dataUrl})`,
-          });
-          writeSseEvent(res, {
-            type: 'followups',
-            questions: [
-              'Create a slightly different variation of this image',
-              'Make it in a cinematic or photorealistic style',
-              'Adjust the aspect ratio or lighting',
-            ],
-          });
-          writeSseEvent(res, { type: 'done' });
-          if (!res.writableEnded) res.end();
-          return;
-        } catch {
-          // Fall back to text chat if image generation fails
-        }
+        const aspectRatio = inferImageAspectRatio(validation.data.message);
+        const generated = await generateFreeChatImage(
+          validation.data.message,
+          aspectRatio,
+          apiKey
+        );
+        const safeAlt = validation.data.message.replace(/[\[\]()\r\n]/g, ' ').trim().slice(0, 80);
+        writeSseEvent(res, { type: 'meta', model: generated.model });
+        writeSseEvent(res, {
+          type: 'delta',
+          text: `Here is your generated image (${aspectRatio}):\n\n![${safeAlt || 'Generated image'}](${generated.dataUrl})`,
+        });
+        writeSseEvent(res, {
+          type: 'followups',
+          questions: [
+            'Create a slightly different variation of this image',
+            'Make it in a cinematic or photorealistic style',
+            'Adjust the aspect ratio or lighting',
+          ],
+        });
+        writeSseEvent(res, { type: 'done' });
+        if (!res.writableEnded) res.end();
+        return;
       }
 
       let cachedWeb: { webSnippet?: string; sources: GroundingSource[] } | null = null;

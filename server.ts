@@ -178,39 +178,44 @@ async function startServer() {
         validation.data.attachments && validation.data.attachments.length > 0
       );
       if (!hasAttachments && detectImageIntent(validation.data.message)) {
-        try {
-          const aspectRatio = inferImageAspectRatio(validation.data.message);
-          const imageRes = await generateImagesWithProvider({
-            prompt: validation.data.message,
-            style: 'none',
-            aspectRatio,
-            count: 1,
+        const aspectRatio = inferImageAspectRatio(validation.data.message);
+        const imageRes = await generateImagesWithProvider({
+          prompt: validation.data.message,
+          style: 'none',
+          aspectRatio,
+          count: 1,
+        });
+        if (imageRes.ok && imageRes.images.length > 0) {
+          const img = imageRes.images[0];
+          const safeAlt = validation.data.message.replace(/[\[\]()\r\n]/g, ' ').trim().slice(0, 80);
+          writeSseEvent(res, { type: 'meta', model: imageRes.model || 'stable_diffusion_free' });
+          writeSseEvent(res, {
+            type: 'delta',
+            text: `Here is your generated image (${aspectRatio}):\n\n![${safeAlt || 'Generated image'}](${img.dataUrl})`,
           });
-          if (imageRes.ok && imageRes.images.length > 0) {
-            const img = imageRes.images[0];
-            const safeAlt = validation.data.message.replace(/[\[\]()\r\n]/g, ' ').trim().slice(0, 80);
-            writeSseEvent(res, { type: 'meta', model: imageRes.model || 'flux-free' });
-            writeSseEvent(res, {
-              type: 'delta',
-              text: `Here is your generated image (${aspectRatio}):\n\n![${safeAlt || 'Generated image'}](${img.dataUrl})`,
-            });
-            writeSseEvent(res, {
-              type: 'followups',
-              questions: [
-                'Create a slightly different variation of this image',
-                'Make it in a cinematic or photorealistic style',
-                'Adjust the aspect ratio or lighting',
-              ],
-            });
-            writeSseEvent(res, { type: 'done' });
-            if (!res.writableEnded) {
-              res.end();
-            }
-            return;
-          }
-        } catch {
-          // Fall back to text chat if image generation fails
+          writeSseEvent(res, {
+            type: 'followups',
+            questions: [
+              'Create a slightly different variation of this image',
+              'Make it in a cinematic or photorealistic style',
+              'Adjust the aspect ratio or lighting',
+            ],
+          });
+          writeSseEvent(res, { type: 'done' });
+        } else {
+          writeSseEvent(res, {
+            type: 'error',
+            code: imageRes.ok ? 'IMAGE_GENERATION_BUSY' : imageRes.code,
+            message: imageRes.ok
+              ? 'The free image generator is busy right now. Please click Retry to try again.'
+              : imageRes.message,
+            retryable: true,
+          });
         }
+        if (!res.writableEnded) {
+          res.end();
+        }
+        return;
       }
 
       const { stream, model, fallbackSources } = await generateChatStream({
